@@ -1,0 +1,15 @@
+[0;36m==> [1;36mNotice:[m Build may be slow as Theos isn’t using all available CPU cores on this computer. Consider upgrading GNU Make: https://theos.dev/docs/parallel-building
+[1;31m> [1;3;39mMaking all in module…[m
+[0;36m==> [1;36mNotice:[m Build may be slow as Theos isn’t using all available CPU cores on this computer. Consider upgrading GNU Make: https://theos.dev/docs/parallel-building
+[1;31m> [1;3;39mMaking all for bundle CleanCCBG2x2…[m
+[0;35m==> [1;39mCopying resource files into the bundle wrapper…[m
+[0;32m==> [1;39mCompiling CleanCCBG2x2.m (arm64)…[m
+[1mCleanCCBG2x2.m:309:75: [0m[0;1;31merror: [0m[1mproperty 'viewIfLoaded' not found on object of type '__strong id'[0m
+    NSTimeInterval cacheInterval = CCBGIsCCAsterEditModeActive(controller.viewIfLoaded) ? 0.10 : 2.0;
+[0;1;32m                                                                          ^
+[0m1 error generated.
+make[4]: *** [/Users/runner/work/test2/test2/.theos/obj/arm64/CleanCCBG2x2.m.e06408a0.o] Error 1
+make[3]: *** [/Users/runner/work/test2/test2/.theos/obj/arm64/CleanCCBG2x2.bundle/CleanCCBG2x2] Error 2
+make[2]: *** [internal-bundle-all_] Error 2
+make[1]: *** [CleanCCBG2x2.all.bundle.variables] Error 2
+make: *** [internal-all] Error 2

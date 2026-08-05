@@ -1199,12 +1199,27 @@ static UIImageView *CCBGArtworkViewInView(UIView *root, UIView *excluded) {
     }
     AVPlayerViewController *native = self.nativePlayerController;
     if (!native) return;
+    CGRect frame = self.mediaContainerView.bounds;
+    CGFloat expectedNativeAlpha = ready ? MIN(1.0, MAX(0.05, self.targetOpacity)) : 0.0;
+    UIView *nativeView = native.view;
+    BOOL nativeStateStable = hasVideo && host && native.parentViewController == host &&
+        native.player == self.player && nativeView.superview == self.mediaContainerView &&
+        !nativeView.hidden && nativeView.userInteractionEnabled == ready &&
+        fabs(nativeView.alpha - expectedNativeAlpha) <= 0.01 &&
+        CGRectEqualToRect(nativeView.frame, frame) && native.showsPlaybackControls &&
+        [native.videoGravity isEqualToString:(self.playerLayer.videoGravity ?: AVLayerVideoGravityResizeAspectFill)] &&
+        self.mediaContainerView.userInteractionEnabled == ready &&
+        self.playerLayer.hidden == ready && self.imageView.hidden == ready;
+    NSString *presentationSignature = [NSString stringWithFormat:@"%p|%p|%p|%@|%@|%d|%d|%d|%.3f",
+        native, self.player, host, NSStringFromCGRect(frame),
+        NSStringFromCGRect(self.mediaContainerView.bounds), ready,
+        nativeView.hidden, nativeView.userInteractionEnabled, nativeView.alpha];
+    if (nativeStateStable && [presentationSignature isEqualToString:self.lastNativePresentationStateSignature]) return;
     // Detach any stale UIKit parent before touching the transport view. The
     // host can be temporarily nil while Control Center is rebuilding its
     // responder chain, but the old parent must still be removed in that
     // window or UIKit can validate the moved view against the wrong host.
     if (hasVideo) [self attachNativePlayerControllerToHost:host];
-    CGRect frame = self.mediaContainerView.bounds;
     if (hasVideo) {
         if (native.view.superview != self.mediaContainerView) {
             [native.view removeFromSuperview];
@@ -1223,13 +1238,14 @@ static UIImageView *CCBGArtworkViewInView(UIView *root, UIView *excluded) {
         self.playerLayer.hidden = ready;
         self.imageView.hidden = ready;
         self.nativePlayerAttachedForExpandedContent = YES;
-        self.lastNativePresentationStateSignature = [NSString stringWithFormat:@"%p|%p|%@|%@|%d|%d|%d|%.3f",
-            native, self.player, NSStringFromCGRect(frame), NSStringFromCGRect(self.mediaContainerView.bounds),
-            ready, native.view.hidden, native.view.userInteractionEnabled, native.view.alpha];
         [self.mediaContainerView bringSubviewToFront:native.view];
         [self.mediaContainerView bringSubviewToFront:self.blurView];
         [self.mediaContainerView bringSubviewToFront:self.dimView];
         [self.mediaContainerView bringSubviewToFront:native.view];
+        self.lastNativePresentationStateSignature = [NSString stringWithFormat:@"%p|%p|%p|%@|%@|%d|%d|%d|%.3f",
+            native, self.player, host, NSStringFromCGRect(frame),
+            NSStringFromCGRect(self.mediaContainerView.bounds), ready,
+            native.view.hidden, native.view.userInteractionEnabled, native.view.alpha];
         return;
     }
     [self detachNativePlayerForCompactPresentation];

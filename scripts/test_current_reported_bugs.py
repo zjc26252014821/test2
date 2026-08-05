@@ -355,6 +355,11 @@ assert visibility_native_reconcile < visibility_early_return
 # force Control Center through a synchronous layout wave on every retry.
 native_recovery = overlay.split("- (void)scheduleNativePlayerPresentationRecovery", 1)[1].split("- (void)detachNativePlayerForCompactPresentation", 1)[0]
 assert "[self layoutIfNeeded];" not in native_recovery
+# Repeated visibility convergence must be a no-op once AVKit is already
+# attached, otherwise every Control Center layout pass performs AVKit work.
+native_update = overlay.rsplit("- (void)updateNativePlayerPresentation", 1)[1].split("- (void)scheduleNativePlayerPresentationRecovery", 1)[0]
+assert "nativeStateStable" in native_update
+assert "[presentationSignature isEqualToString:self.lastNativePresentationStateSignature]" in native_update
 
 # Appearance preferences are applied from preference/transition callbacks;
 # layout passes only re-check them when geometry or expanded state changed.

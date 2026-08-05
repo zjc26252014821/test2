@@ -303,7 +303,11 @@ static BOOL CCBGReadCCAsterGridSize(id controller, CCUILayoutSize *size) {
     if (!identifier.length) return NO;
     CFStringRef domain = CFSTR("com.futur3sn0w.ccaster.preferences");
     NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
-    if (!CCBGHasCachedCCAsterGridSizes || now - CCBGLastCCAsterGridReadAt >= 0.5) {
+    // CCAster writes continuously only while its resize shield is active.
+    // Outside that deliberate edit gesture, avoid having each Clean module
+    // synchronize the external preference domain on every layout burst.
+    NSTimeInterval cacheInterval = CCBGIsCCAsterEditModeActive(controller.viewIfLoaded) ? 0.10 : 2.0;
+    if (!CCBGHasCachedCCAsterGridSizes || now - CCBGLastCCAsterGridReadAt >= cacheInterval) {
         // CCAster is written by the settings app but read from SpringBoard.
         // Keep a short cache because Control Center asks for module size many
         // times per layout pass, while size-reload notifications invalidate it
@@ -326,7 +330,10 @@ static BOOL CCBGReadCCAsterGridSize(id controller, CCUILayoutSize *size) {
 
 static CCUILayoutSize CCBGRuntimeModuleSize(int orientation) {
     NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
-    if (!CCBGHasCachedRuntimeGridSize || now - CCBGLastRuntimeGridReadAt >= 0.5) {
+    // Clean's own size writes send CCBGSizeReloadCallback and invalidate this
+    // cache immediately, so normal Control Center layout does not need to
+    // cross the preference boundary more than once every two seconds.
+    if (!CCBGHasCachedRuntimeGridSize || now - CCBGLastRuntimeGridReadAt >= 2.0) {
         NSArray<NSString *> *keys = @[
             CCBGPreferenceKeyForModule(@"gridWidth", CCBG_MODULE_SLOT),
             CCBGPreferenceKeyForModule(@"gridHeight", CCBG_MODULE_SLOT),
@@ -620,6 +627,7 @@ static UIImage *CCBGThumbnailForItem(NSDictionary *item, CGSize size) {
 @property(nonatomic) BOOL expanded;
 @property(nonatomic, strong) UIImage *preloadedImage;
 @property(nonatomic, strong) AVURLAsset *preloadedAsset;
+@property(nonatomic, strong) AVAssetImageGenerator *preloadImageGenerator;
 @property(nonatomic, copy) NSString *preloadedFileName;
 @property(nonatomic) NSInteger videoBoundaryCount;
 @property(nonatomic) NSInteger pendingManualAdvanceOffset;
@@ -769,6 +777,7 @@ static UIImage *CCBGThumbnailForItem(NSDictionary *item, CGSize size) {
 - (void)reloadAfterFirstMountIfNeeded;
 - (void)updateAdaptiveExpandedSizeForItem:(NSDictionary *)item;
 - (void)preloadNextMedia;
+- (void)clearPreloadedNextMedia;
 - (void)videoFailed:(NSNotification *)notification;
 - (void)videoStalled:(NSNotification *)notification;
 - (void)presentMediaSelectionList;
@@ -1567,6 +1576,7 @@ static void CCBGPresentationRecoveryCallback(
     self.mountReloadAttempts = 0;
     [self setExpandedInteractionEnabled:NO];
     self.pendingManualAdvanceOffset = 0;
+    [self clearPreloadedNextMedia];
     [self.environmentTimer invalidate];
     [self.videoWatchdog invalidate];
     self.environmentTimer = nil;
@@ -2641,6 +2651,7 @@ static void CCBGPresentationRecoveryCallback(
     CGFloat previousCornerRadius = self.view.layer.cornerRadius;
     CGFloat previousMediaRadius = MAX(0.0, previousCornerRadius - CCBGMediaInsetForFrame(self.view, self.imageView.frame));
     self.expanded = enabled;
+    if (!enabled) [self clearPreloadedNextMedia];
     NSDictionary *sceneContext = CCBGSceneContextForModule(self.view);
     if (CCBGSceneDirectorBreathingGridEnabled(sceneContext)) CCBGSceneDirectorSetExpandedSlot(enabled ? CCBG_MODULE_SLOT : -1);
     [self applyFallbackColor];
@@ -3080,15 +3091,15 @@ static void CCBGPresentationRecoveryCallback(
     NSString *selection = [self automationSelectionForItems:items] ?: @"";
     NSDictionary *context = CCBGSceneContextForModule(self.view);
     NSString *sceneID = CCBGSceneDirectorResolvedScene(context)[@"id"] ?: @"";
-    NSDateComponents *components = [NSCalendar.currentCalendar components:(NSCalendarUnitWeekday | NSCalendarUnitHour | NSCalendarUnitMinute) fromDate:NSDate.date];
     NSArray *names = [items valueForKey:@"fileName"] ?: @[];
-    return [NSString stringWithFormat:@"%@|scene=%@|dark=%d|focus=%@|low=%d|charging=%d|locked=%d|landscape=%d|weekday=%ld|minute=%ld|items=%@", selection, sceneID,
+    return [NSString stringWithFormat:@"%@|scene=%@|dark=%d|focus=%@|low=%d|charging=%d|locked=%d|landscape=%d|items=%@", selection, sceneID,
             [context[@"dark"] boolValue], context[@"focus"] ?: @"", NSProcessInfo.processInfo.lowPowerModeEnabled,
             [context[@"charging"] boolValue], [context[@"locked"] boolValue], [context[@"landscape"] boolValue],
-            (long)components.weekday, (long)(components.hour * 60 + components.minute), [names componentsJoinedByString:@","]];
+            [names componentsJoinedByString:@","]];
 }
 
 - (void)environmentDidChange:(NSNotification *)notification {
+    if (!self.visible || !self.view.window || !CCBGPluginEnabled()) return;
     BOOL orientationRefresh = [notification.name isEqualToString:CCBGModuleLayoutOrientationDidChangeNotification] ||
         [notification.name isEqualToString:UIDeviceOrientationDidChangeNotification];
     @synchronized (self) {
@@ -3097,6 +3108,7 @@ static void CCBGPresentationRecoveryCallback(
         self.environmentChangeScheduled = YES;
     }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (!self.visible || !self.view.window || !CCBGPluginEnabled()) return;
         BOOL needsOrientationRefresh = NO;
         @synchronized (self) {
             self.environmentChangeScheduled = NO;
@@ -3104,7 +3116,10 @@ static void CCBGPresentationRecoveryCallback(
             self.pendingOrientationRefresh = NO;
         }
         NSTimeInterval now = NSDate.date.timeIntervalSince1970;
-        if (self.player.currentItem && now - self.lastRuntimePersistAt >= 10.0) {
+        // Playback position is diagnostic/replay metadata, not a transport
+        // checkpoint. Keep writes sparse so five visible modules do not
+        // contend on the shared preference/analytics queues every few seconds.
+        if (self.player.currentItem && now - self.lastRuntimePersistAt >= 30.0) {
             self.lastRuntimePersistAt = now;
             NSTimeInterval position = MAX(0.0, CMTimeGetSeconds(self.player.currentTime));
             NSTimeInterval duration = MAX(0.0, CMTimeGetSeconds(self.player.currentItem.duration));
@@ -3133,7 +3148,10 @@ static void CCBGPresentationRecoveryCallback(
             [self reloadAfterFirstMountIfNeeded];
             [self convergeMountedPresentation:@"environment-change"];
             [self scheduleMountedPresentationConvergence:@"environment-change"];
-            [self scheduleEnvironmentRefresh];
+            // A normal state notification is already authoritative. A second
+            // full reload is only useful after rotation, when Control Center's
+            // layout has not yet reached its final bounds.
+            if (needsOrientationRefresh) [self scheduleEnvironmentRefresh];
         }
         if (needsOrientationRefresh) {
             __weak typeof(self) weakSelf = self;
@@ -3149,7 +3167,7 @@ static void CCBGPresentationRecoveryCallback(
     __weak typeof(self) weakSelf = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         __strong typeof(weakSelf) self = weakSelf;
-        if (!self || generation != self.environmentRefreshGeneration || !CCBGPluginEnabled()) return;
+        if (!self || generation != self.environmentRefreshGeneration || !self.visible || !self.view.window || !CCBGPluginEnabled()) return;
         [self reloadPreferencesAndMedia];
         [self reloadAfterFirstMountIfNeeded];
         [self convergeMountedPresentation:@"environment-settled"];
@@ -3159,11 +3177,19 @@ static void CCBGPresentationRecoveryCallback(
 
 - (void)startEnvironmentTimer {
     [self.environmentTimer invalidate];
+    self.environmentTimer = nil;
+    if (!self.visible || !self.view.window || !CCBGPluginEnabled()) return;
     __weak typeof(self) weakSelf = self;
-    self.environmentTimer = [NSTimer scheduledTimerWithTimeInterval:10.0 repeats:YES block:^(NSTimer *timer) {
-        [weakSelf environmentDidChange:nil];
+    self.environmentTimer = [NSTimer scheduledTimerWithTimeInterval:30.0 repeats:YES block:^(NSTimer *timer) {
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self || !self.visible || !self.view.window || !CCBGPluginEnabled()) {
+            [timer invalidate];
+            if (self) self.environmentTimer = nil;
+            return;
+        }
+        [self environmentDidChange:nil];
     }];
-    self.environmentTimer.tolerance = 2.0;
+    self.environmentTimer.tolerance = 5.0;
 }
 
 - (NSArray<NSDictionary *> *)eligibleItems:(NSArray<NSDictionary *> *)catalog {
@@ -3644,9 +3670,7 @@ static void CCBGPresentationRecoveryCallback(
 }
 
 - (void)mediaMemoryWarning:(NSNotification *)notification {
-    self.preloadedImage = nil;
-    self.preloadedAsset = nil;
-    self.preloadedFileName = nil;
+    [self clearPreloadedNextMedia];
     [self.pickerThumbnailCache removeAllObjects];
     [self.pendingPickerThumbnailCallbacks removeAllObjects];
     NSString *fileName = [self.currentItem[@"fileName"] copy];
@@ -4151,10 +4175,11 @@ static void CCBGPresentationRecoveryCallback(
 }
 
 - (void)preloadNextMedia {
-    self.preloadedImage = nil;
-    self.preloadedFileName = nil;
-    self.preloadedAsset = nil;
-    if (!self.expanded || ![CCBGModulePreference(@"preloadEnabled", @YES) boolValue] || self.mediaItems.count < 2) return;
+    [self clearPreloadedNextMedia];
+    if (!self.visible || !self.view.window || !self.expanded ||
+        ![CCBGModulePreference(@"preloadEnabled", @YES) boolValue] ||
+        [CCBGModulePreference(@"performanceMode", @NO) boolValue] ||
+        self.mediaItems.count < 2) return;
     NSInteger nextIndex = (self.mediaIndex + 1) % self.mediaItems.count;
     NSDictionary *next = self.mediaItems[nextIndex];
     NSUInteger preloadGeneration = self.playbackInstallGeneration;
@@ -4163,6 +4188,7 @@ static void CCBGPresentationRecoveryCallback(
         self.preloadedAsset = [AVURLAsset URLAssetWithURL:[NSURL fileURLWithPath:CCBGPathForItem(next)] options:@{AVURLAssetPreferPreciseDurationAndTimingKey: @NO}];
         [self.preloadedAsset loadValuesAsynchronouslyForKeys:@[@"playable"] completionHandler:^{}];
         AVAssetImageGenerator *generator = [[AVAssetImageGenerator alloc] initWithAsset:self.preloadedAsset];
+        self.preloadImageGenerator = generator;
         generator.appliesPreferredTrackTransform = YES;
         NSString *name = next[@"fileName"];
         [generator generateCGImagesAsynchronouslyForTimes:@[[NSValue valueWithCMTime:kCMTimeZero]] completionHandler:^(CMTime requestedTime, CGImageRef image, CMTime actualTime, AVAssetImageGeneratorResult result, NSError *error) {
@@ -4170,8 +4196,11 @@ static void CCBGPresentationRecoveryCallback(
             UIImage *frame = [UIImage imageWithCGImage:image];
             dispatch_async(dispatch_get_main_queue(), ^{
                 __strong typeof(weakSelf) self = weakSelf;
-                if (!self || preloadGeneration != self.playbackInstallGeneration || !self.expanded ||
+                if (!self || preloadGeneration != self.playbackInstallGeneration || !self.visible || !self.view.window || !self.expanded ||
                     self.mediaItems.count < 2 || ![self.mediaItems[(self.mediaIndex + 1) % self.mediaItems.count][@"fileName"] isEqualToString:name]) return;
+                if (self.preloadImageGenerator != generator) return;
+                self.preloadImageGenerator = nil;
+                self.preloadedAsset = nil;
                 self.preloadedFileName = name;
                 self.preloadedImage = frame;
             });
@@ -4184,12 +4213,21 @@ static void CCBGPresentationRecoveryCallback(
         UIImage *image = [UIImage imageWithContentsOfFile:path];
         dispatch_async(dispatch_get_main_queue(), ^{
             __strong typeof(weakSelf) self = weakSelf;
-            if (!self || preloadGeneration != self.playbackInstallGeneration || !self.expanded ||
+            if (!self || preloadGeneration != self.playbackInstallGeneration || !self.visible || !self.view.window || !self.expanded ||
                 self.mediaItems.count < 2 || ![self.mediaItems[(self.mediaIndex + 1) % self.mediaItems.count][@"fileName"] isEqualToString:name]) return;
             self.preloadedFileName = name;
             self.preloadedImage = image;
         });
     });
+}
+
+- (void)clearPreloadedNextMedia {
+    [self.preloadImageGenerator cancelAllCGImageGeneration];
+    self.preloadImageGenerator = nil;
+    [self.preloadedAsset cancelLoading];
+    self.preloadedAsset = nil;
+    self.preloadedImage = nil;
+    self.preloadedFileName = nil;
 }
 
 - (void)rememberCurrentItem {

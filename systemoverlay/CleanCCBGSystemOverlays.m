@@ -251,6 +251,10 @@ static NSCache<NSString *, NSData *> *CCBGPreloadedOverlayFrames;
 static NSCache<NSString *, UIImage *> *CCBGPreloadedOverlayImages;
 static NSArray<NSDictionary *> *CCBGPreloadedOverlayCatalog;
 static NSUInteger CCBGOverlayStartupRefreshPasses;
+// Several style/lock Darwin notifications are emitted as one logical state
+// change. Coalesce their main-thread recovery work before it reaches the
+// overlay/controller and AVFoundation layers.
+static BOOL CCBGSystemOverlayReloadScheduled;
 // A module controller can keep its view/window after Control Center closes.
 // Treat the presentation root, rather than that stale window, as the single
 // authority for whether overlay AVFoundation work may remain active.
@@ -276,6 +280,7 @@ static BOOL CCBGGenericExpandedStateForKind(CCBGSystemOverlayKind kind, BOOL *kn
 static void CCBGSetGenericExpandedStateForKind(CCBGSystemOverlayKind kind, BOOL expanded);
 static void CCBGClearGenericExpandedStateForKind(CCBGSystemOverlayKind kind);
 static UIView *CCBGTakeoverRootView(UIViewController *controller);
+static UIViewController *CCBGTakeoverRootController(UIViewController *controller, UIView *mountedView);
 static void CCBGRemoveTakeoverBackdrop(CCBGSystemOverlayView *overlay);
 static CCBGSystemOverlayView *CCBGClaimTakeoverOverlay(UIViewController *controller,
                                                         CCBGSystemOverlayKind kind);
@@ -321,6 +326,17 @@ static void CCBGCacheOverlayImage(UIImage *image, NSString *key) {
     CGImageRef cgImage = image.CGImage;
     NSUInteger cost = cgImage ? CGImageGetWidth(cgImage) * CGImageGetHeight(cgImage) * 4 : 0;
     [CCBGPreloadedOverlayImages setObject:image forKey:key cost:cost];
+}
+
+// The catalog is cheap metadata and remains useful for the next presentation.
+// Decoded covers and AVAssets, however, can keep IOSurface memory resident in
+// SpringBoard after Control Center has gone away.
+static void CCBGDiscardOverlayTransientMediaCaches(void) {
+    @synchronized (CCBGPreloadedOverlayAssets) {
+        [CCBGPreloadedOverlayAssets removeAllObjects];
+    }
+    [CCBGPreloadedOverlayFrames removeAllObjects];
+    [CCBGPreloadedOverlayImages removeAllObjects];
 }
 
 static char CCBGAppliedGaussianBlurKey;
@@ -831,7 +847,7 @@ static void CCBGPrewarmOverlayMedia(void) {
             NSArray<CCBGSystemOverlayView *> *views = nil;
             @synchronized (CCBGOverlayViews) { views = CCBGOverlayViews.allObjects; }
             for (CCBGSystemOverlayView *overlay in views) {
-                BOOL needsRecovery = overlay.window && !overlay.hidden && !overlay.player.currentItem;
+                BOOL needsRecovery = CCBGControlCenterPresentationVisible && overlay.window && !overlay.hidden && !overlay.player.currentItem;
                 if (!needsRecovery) continue;
                 overlay.configurationSignature = nil;
                 [overlay reloadAfterPreferenceChange];
@@ -1152,13 +1168,15 @@ static UIImageView *CCBGArtworkViewInView(UIView *root, UIView *excluded) {
     // that canvas, not to an intermediate responder that may vanish midway
     // through the transition. This mirrors the five-module child-controller
     // relationship while keeping generic takeover reparenting valid.
-    UIViewController *presentationRoot = CCBGLastPresentationRoot;
-    if (CCBGOverlayUsesCleanTakeover(self) && self.expandedPresentation &&
-        presentationRoot.isViewLoaded && presentationRoot.view.window &&
-        [self isDescendantOfView:presentationRoot.view]) {
-        return presentationRoot;
+    if (CCBGOverlayUsesCleanTakeover(self) && self.expandedPresentation) {
+        UIViewController *mountedHost = CCBGTakeoverRootController(self.hostController, self);
+        if (mountedHost) return mountedHost;
     }
-    return CCBGViewHostController(self.superview) ?: self.hostController;
+    UIViewController *responderHost = CCBGViewHostController(self.superview);
+    if (responderHost && responderHost.isViewLoaded && [self isDescendantOfView:responderHost.view]) {
+        return responderHost;
+    }
+    return self.hostController;
 }
 
 - (void)updateNativePlayerPresentation {
@@ -1220,7 +1238,7 @@ static UIImageView *CCBGArtworkViewInView(UIView *root, UIView *excluded) {
 - (void)scheduleNativePlayerPresentationRecovery {
     if (!CCBGOverlayUsesCleanTakeover(self) || !self.expandedPresentation ||
         !self.currentItem || !CCBGIsVideoName(self.currentItem[@"fileName"]) ||
-        !self.player.currentItem) return;
+        !self.player.currentItem || !CCBGControlCenterPresentationVisible) return;
     if (self.nativePresentationRecoveryArmed) return;
     self.nativePresentationRecoveryArmed = YES;
     NSUInteger generation = ++self.nativePresentationRecoveryGeneration;
@@ -1229,7 +1247,7 @@ static UIImageView *CCBGArtworkViewInView(UIView *root, UIView *excluded) {
     for (NSNumber *delayValue in delays) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delayValue.doubleValue * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             __strong typeof(weakSelf) self = weakSelf;
-            if (!self || generation != self.nativePresentationRecoveryGeneration) return;
+            if (!self || generation != self.nativePresentationRecoveryGeneration || !CCBGControlCenterPresentationVisible) return;
             if (!self.expandedPresentation || !CCBGOverlayUsesCleanTakeover(self) ||
                 !self.player.currentItem || !self.currentItem ||
                 !CCBGIsVideoName(self.currentItem[@"fileName"])) {
@@ -1505,8 +1523,12 @@ static UIImageView *CCBGArtworkViewInView(UIView *root, UIView *excluded) {
     if (previousTraitCollection && previousTraitCollection.userInterfaceStyle == self.traitCollection.userInterfaceStyle) return;
     CCBGInvalidateSceneRuntimeCaches();
     self.configurationSignature = nil;
+    if (!CCBGControlCenterPresentationVisible) return;
     __weak typeof(self) weakSelf = self;
-    dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf reloadIfNeeded:YES]; });
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!CCBGControlCenterPresentationVisible) return;
+        [weakSelf reloadIfNeeded:YES];
+    });
 }
 
 - (CGRect)expandedFrameForHostView:(UIView *)hostView module:(NSDictionary *)genericModule {
@@ -1709,6 +1731,15 @@ static BOOL CCBGHasOverlayPreferenceSnapshot(void) {
 - (void)environmentDidChange:(NSNotification *)notification {
     BOOL orientationRefresh = [notification.name isEqualToString:UIDeviceOrientationDidChangeNotification] ||
         [notification.name isEqualToString:@"com.zjc.cleanccbg2x2.module-layout-orientation"];
+    // Retained module views continue receiving system notifications after the
+    // Control Center has dismissed.  Record that their configuration is stale,
+    // but defer AVFoundation/layout work until the next real presentation.
+    if (!CCBGControlCenterPresentationVisible) {
+        self.lastConfigurationCheck = 0.0;
+        self.pendingSceneOrientationRefresh = NO;
+        self.sceneEnvironmentRefreshScheduled = NO;
+        return;
+    }
     @synchronized (self) {
         self.pendingSceneOrientationRefresh = self.pendingSceneOrientationRefresh || orientationRefresh;
         if (self.sceneEnvironmentRefreshScheduled) return;
@@ -1720,6 +1751,10 @@ static BOOL CCBGHasOverlayPreferenceSnapshot(void) {
             self.sceneEnvironmentRefreshScheduled = NO;
             needsOrientationRefresh = self.pendingSceneOrientationRefresh;
             self.pendingSceneOrientationRefresh = NO;
+        }
+        if (!CCBGControlCenterPresentationVisible) {
+            self.lastConfigurationCheck = 0.0;
+            return;
         }
         CCBGInvalidateSceneRuntimeCaches();
         self.lastConfigurationCheck = 0;
@@ -2485,9 +2520,11 @@ static BOOL CCBGHasOverlayPreferenceSnapshot(void) {
         NSUInteger coverGeneration = self.playbackGeneration;
         __weak typeof(self) weakSelf = self;
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            if (!CCBGControlCenterPresentationVisible) return;
             NSData *coverFrameData = [CCBGPreloadedOverlayFrames objectForKey:assetCacheKey];
             if (!coverFrameData.length) coverFrameData = [NSData dataWithContentsOfFile:CCBGOverlayFrameCachePath(coverItem)];
             UIImage *decodedCover = coverFrameData.length ? [UIImage imageWithData:coverFrameData] : nil;
+            if (!CCBGControlCenterPresentationVisible) return;
             CCBGCacheOverlayImage(decodedCover, assetCacheKey);
             if (!decodedCover) return;
             dispatch_async(dispatch_get_main_queue(), ^{
@@ -2625,6 +2662,7 @@ static BOOL CCBGHasOverlayPreferenceSnapshot(void) {
 }
 
 - (void)startPlaybackWhenReady {
+    if (!CCBGControlCenterPresentationVisible) return;
     if (self.hidden || !self.player || self.player.currentItem.status != AVPlayerItemStatusReadyToPlay) return;
     if (NSProcessInfo.processInfo.lowPowerModeEnabled && CCBGSceneDirectorLowPowerStatic(CCBGSceneRuntimeContext(self))) {
         [self applySceneLowPowerPolicy];
@@ -2640,6 +2678,10 @@ static BOOL CCBGHasOverlayPreferenceSnapshot(void) {
 
 - (void)schedulePlaybackReadinessCheck:(NSUInteger)generation attempt:(NSUInteger)attempt {
     if (generation != self.playbackGeneration || !self.player) return;
+    if (!CCBGControlCenterPresentationVisible) {
+        self.readinessCheckActive = NO;
+        return;
+    }
     if (self.hidden) {
         self.readinessCheckActive = NO;
         return;
@@ -3273,6 +3315,22 @@ static UIView *CCBGTakeoverRootView(UIViewController *controller) {
     return controller.viewIfLoaded;
 }
 
+static UIViewController *CCBGTakeoverRootController(UIViewController *controller, UIView *mountedView) {
+    if (!controller || !mountedView) return nil;
+    UIWindow *window = mountedView.window ?: controller.viewIfLoaded.window;
+    for (UIViewController *candidate = controller; candidate; candidate = candidate.parentViewController) {
+        UIView *candidateView = candidate.viewIfLoaded;
+        if (!candidateView || (window && candidateView.window != window)) continue;
+        // This is the containment invariant AVKit needs: its child controller
+        // must belong to a controller whose view actually owns the expanded
+        // overlay, not the compact module controller it was reparented from.
+        if ([mountedView isDescendantOfView:candidateView]) return candidate;
+    }
+    UIViewController *windowRoot = window.rootViewController;
+    if (windowRoot.isViewLoaded && [mountedView isDescendantOfView:windowRoot.view]) return windowRoot;
+    return nil;
+}
+
 static UIView *CCBGOverlayHostView(UIViewController *controller, CCBGSystemOverlayKind kind) {
     if (CCBGGenericModuleUsesCleanTakeover(kind)) {
         // Legacy behavior was: if (CCBGGenericModuleUsesCleanTakeover(kind)) return controller.view;
@@ -3612,6 +3670,14 @@ static void CCBGRecordOverlayDiagnostic(UIViewController *controller, CCBGSystem
 
 static void CCBGHideController(UIViewController *controller);
 
+static CCBGSystemOverlayView *CCBGExpandedTakeoverOverlay(NSArray<CCBGSystemOverlayView *> *views) {
+    for (CCBGSystemOverlayView *candidate in views) {
+        if (!candidate || !candidate.window || candidate.hidden || !candidate.expandedPresentation) continue;
+        if (CCBGOverlayUsesCleanTakeover(candidate)) return candidate;
+    }
+    return nil;
+}
+
 static void CCBGShowOverlayWithPresentationArbitration(CCBGSystemOverlayView *overlay) {
     if (!overlay) return;
     if (!CCBGControlCenterPresentationVisible) {
@@ -3620,6 +3686,21 @@ static void CCBGShowOverlayWithPresentationArbitration(CCBGSystemOverlayView *ov
     }
     NSArray<CCBGSystemOverlayView *> *views = nil;
     @synchronized (CCBGOverlayViews) { views = CCBGOverlayViews.allObjects; }
+    CCBGSystemOverlayView *expandedTakeover = CCBGExpandedTakeoverOverlay(views);
+    if (overlay.expandedPresentation && CCBGOverlayUsesCleanTakeover(overlay)) {
+        // The Clean takeover is mounted above the whole Control Center canvas.
+        // Pausing every obscured Clean surface removes unnecessary concurrent
+        // hardware decode without changing normal system-module expansion.
+        for (CCBGSystemOverlayView *candidate in views) {
+            if (candidate != overlay && !candidate.expandedPresentation) [candidate setPlaybackVisible:NO];
+        }
+        [overlay setPlaybackVisible:YES];
+        return;
+    }
+    if (expandedTakeover && expandedTakeover != overlay) {
+        [overlay setPlaybackVisible:NO];
+        return;
+    }
     if (overlay.expandedPresentation) {
         for (CCBGSystemOverlayView *candidate in views) {
             if (candidate != overlay && candidate.kind == overlay.kind && !candidate.expandedPresentation) {
@@ -3636,6 +3717,16 @@ static void CCBGShowOverlayWithPresentationArbitration(CCBGSystemOverlayView *ov
         }
     }
     [overlay setPlaybackVisible:YES];
+    // A collapsed takeover leaves its compact peers mounted but paused. Resume
+    // only the already-configured compact surfaces; disabled/detached modules
+    // never regain visibility through this recovery pass.
+    if (!CCBGExpandedTakeoverOverlay(views)) {
+        for (CCBGSystemOverlayView *candidate in views) {
+            if (candidate == overlay || candidate.expandedPresentation || !candidate.window ||
+                !candidate.superview || !candidate.configurationSignature.length) continue;
+            [candidate setPlaybackVisible:YES];
+        }
+    }
 }
 
 static void CCBGDetachOverlayViewNow(CCBGSystemOverlayView *overlay) {
@@ -4027,7 +4118,7 @@ static void CCBGScheduleTrackedOverlayRefreshes(void) {
     // mounted module during a single toggle or unlock.
     for (NSNumber *delayValue in @[@0.0, @0.35]) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delayValue.doubleValue * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            if (generation != CCBGTrackedOverlayRefreshGeneration || !CCBGPluginEnabled()) return;
+            if (generation != CCBGTrackedOverlayRefreshGeneration || !CCBGPluginEnabled() || !CCBGControlCenterPresentationVisible) return;
             CCBGRefreshTrackedOverlayControllers();
         });
     }
@@ -4036,7 +4127,7 @@ static void CCBGScheduleTrackedOverlayRefreshes(void) {
 static void CCBGScheduleTrackedOverlayRefreshOnce(void) {
     NSUInteger generation = ++CCBGTrackedOverlayRefreshGeneration;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.18 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        if (generation != CCBGTrackedOverlayRefreshGeneration || !CCBGPluginEnabled()) return;
+        if (generation != CCBGTrackedOverlayRefreshGeneration || !CCBGPluginEnabled() || !CCBGControlCenterPresentationVisible) return;
         CCBGRefreshTrackedOverlayControllers();
     });
 }
@@ -4058,7 +4149,7 @@ static void CCBGSchedulePresentationRootRebind(void) {
     // four times on the opening animation.
     for (NSNumber *delayValue in @[@0.12, @0.42]) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delayValue.doubleValue * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            if (generation != CCBGPresentationRootRebindGeneration || !CCBGPluginEnabled()) return;
+            if (generation != CCBGPresentationRootRebindGeneration || !CCBGPluginEnabled() || !CCBGControlCenterPresentationVisible) return;
             if (!root || !root.isViewLoaded || !root.view.window || root.view.hidden) return;
             if (delayValue.doubleValue <= 0.12) CCBGRefreshTrackedOverlayControllers();
             CCBGRebindPresentationRootControllers(root);
@@ -4105,6 +4196,7 @@ static void CCBGHideController(UIViewController *controller) {
     }
     [overlay setPlaybackVisible:NO];
     CCBGScheduleOverlayDetachAfterDismissal(overlay);
+    if (!CCBGControlCenterPresentationVisible) return;
     NSArray<CCBGSystemOverlayView *> *views = nil;
     @synchronized (CCBGOverlayViews) { views = CCBGOverlayViews.allObjects; }
     for (CCBGSystemOverlayView *candidate in views) {
@@ -4195,6 +4287,7 @@ static void CCBGHookControlCenterPresentationClass(Class cls) {
         // presentation time is allowed to end the shared visibility session.
         if (controller != CCBGLastPresentationRoot) return;
         CCBGControlCenterPresentationVisible = NO;
+        CCBGDiscardOverlayTransientMediaCaches();
         CCBGResetTakeoverPresentationState(controller);
     });
     class_replaceMethod(cls, disappearSelector, disappearReplacement, disappearTypes);
@@ -4757,8 +4850,33 @@ static void CCBGScheduleBrightnessVolumeDiscovery(void) {
     });
 }
 
+static BOOL CCBGHookInstallScheduled;
+static NSObject *CCBGHookInstallationLock(void) {
+    static NSObject *lock;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ lock = [NSObject new]; });
+    return lock;
+}
+
+static void CCBGScheduleHookInstallation(void) {
+    BOOL shouldSchedule = NO;
+    @synchronized (CCBGHookInstallationLock()) {
+        if (!CCBGHookInstallScheduled) {
+            CCBGHookInstallScheduled = YES;
+            shouldSchedule = YES;
+        }
+    }
+    if (!shouldSchedule) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @synchronized (CCBGHookInstallationLock()) {
+            CCBGHookInstallScheduled = NO;
+        }
+        CCBGInstallHooks();
+    });
+}
+
 static void CCBGImageLoaded(const struct mach_header *header, intptr_t slide) {
-    dispatch_async(dispatch_get_main_queue(), ^{ CCBGInstallHooks(); });
+    CCBGScheduleHookInstallation();
     Dl_info imageInfo = {0};
     if (header && dladdr(header, &imageInfo) != 0 && imageInfo.dli_fname) {
         NSString *path = [NSString stringWithUTF8String:imageInfo.dli_fname].lowercaseString;
@@ -4771,6 +4889,10 @@ static void CCBGImageLoaded(const struct mach_header *header, intptr_t slide) {
 
 static void CCBGSystemOverlayReload(CFNotificationCenterRef center, void *observer, CFNotificationName name, const void *object, CFDictionaryRef userInfo) {
     dispatch_async(dispatch_get_main_queue(), ^{
+        if (CCBGSystemOverlayReloadScheduled) return;
+        CCBGSystemOverlayReloadScheduled = YES;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            CCBGSystemOverlayReloadScheduled = NO;
         // The master switch is hosted by a separate Control Center bundle on
         // some iOS builds. Invalidate this process' preference cache before
         // resolving the new enabled state from the Darwin notification.
@@ -4782,12 +4904,14 @@ static void CCBGSystemOverlayReload(CFNotificationCenterRef center, void *observ
             NSArray<CCBGSystemOverlayView *> *views = nil;
             @synchronized (CCBGOverlayViews) { views = CCBGOverlayViews.allObjects; }
             BOOL locked = CCBGSystemIsLocked();
+            BOOL presentationVisible = CCBGControlCenterPresentationVisible;
             // Locking is a real Control Center presentation boundary. Clear
             // takeover expansion before the next unlock so a replacement
             // third-party controller cannot reopen in the stale expanded
             // state left by the previous presentation.
             if (locked) {
                 CCBGControlCenterPresentationVisible = NO;
+                CCBGDiscardOverlayTransientMediaCaches();
                 for (CCBGSystemOverlayView *overlay in views) {
                     if (!overlay) continue;
                     if (CCBGGenericModuleUsesCleanTakeover(overlay.kind)) {
@@ -4811,6 +4935,16 @@ static void CCBGSystemOverlayReload(CFNotificationCenterRef center, void *observ
                     }
                     CCBGDetachOverlayViewNow(overlay);
                     CCBGRestoreNativeModuleVisibility(hostController);
+                    continue;
+                }
+                // SpringBoard keeps many Control Center controllers mounted
+                // after the sheet closes. Preference/style notifications can
+                // still reach them there; defer their media/layout rebuild to
+                // the next real presentation instead of waking AVFoundation
+                // and its helper processes while nothing is on screen.
+                if (!presentationVisible) {
+                    overlay.configurationSignature = nil;
+                    overlay.lastConfigurationCheck = 0.0;
                     continue;
                 }
                 if (hostController.isViewLoaded && (hostController.view.window || hostController.view.superview)) {
@@ -4850,10 +4984,11 @@ static void CCBGSystemOverlayReload(CFNotificationCenterRef center, void *observ
             // lock/unlock cycle. Without both passes, enabling and disabling
             // the master switch can leave a covered module's native view
             // suppressed with no overlay left to restore it.
-            if (pluginEnabled && !locked) {
+            if (pluginEnabled && !locked && presentationVisible) {
                 CCBGScheduleTrackedOverlayRefreshes();
                 CCBGSchedulePresentationRootRebind();
             }
+        });
         });
     });
 }
@@ -4885,7 +5020,10 @@ static void CCBGHandleFocusActivityChange(void) {
             NSString *signature = [aliases componentsJoinedByString:@"|"];
             if (![signature isEqualToString:CCBGLastFocusStateSignature]) {
                 CCBGLastFocusStateSignature = [signature copy];
-                CCBGPostReload();
+                // The next Control Center presentation resolves the current
+                // scene from these refreshed aliases. Avoid waking retained
+                // overlay controllers just to redraw an offscreen surface.
+                if (CCBGControlCenterPresentationVisible) CCBGPostReload();
             }
         });
     }
@@ -4920,6 +5058,9 @@ static void CCBGStartNetworkMonitoring(void) {
         }
         if (state == CCBGCurrentConnectivityState) return;
         CCBGCurrentConnectivityState = state;
+        // Store network state immediately, but do not construct or reload an
+        // overlay until it can actually be seen.
+        if (!CCBGControlCenterPresentationVisible) return;
         @synchronized (CCBGOverlayViews) {
             for (CCBGSystemOverlayView *overlay in CCBGOverlayViews) {
                 if (overlay.kind == CCBGSystemOverlayKindConnectivity) [overlay reloadIfNeeded:YES];

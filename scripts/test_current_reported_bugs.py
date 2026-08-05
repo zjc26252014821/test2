@@ -27,7 +27,9 @@ assert "nativePresentationRecoveryArmed" in overlay
 assert "- (void)scheduleNativePlayerPresentationRecovery" in overlay
 assert "- (void)attachNativePlayerControllerToHost:(UIViewController *)host" in overlay
 assert "- (UIViewController *)nativePlayerPresentationHost" in overlay
-assert "CCBGViewHostController(self.superview) ?: self.hostController" in overlay
+assert "CCBGTakeoverRootController(self.hostController, self)" in overlay
+assert "static UIViewController *CCBGTakeoverRootController(UIViewController *controller, UIView *mountedView)" in overlay
+assert "[mountedView isDescendantOfView:candidateView]" in overlay
 assert "CCBGLastPresentationRoot" in overlay
 assert "CCBGControlCenterPresentationVisible" in overlay
 assert "- (void)suspendForInactiveControlCenterPresentation" in overlay
@@ -145,6 +147,9 @@ prewarm_body = overlay.split("static void CCBGPrewarmOverlayMedia", 1)[1].split(
 assert "CCBGLoadVideoOnlyAsset" not in prewarm_body
 assert "AVAssetImageGenerator" not in prewarm_body
 assert "dispatch_group" not in prewarm_body
+# A retained Control Center window is not proof that the presentation remains
+# visible.  Catalog completion must never revive media after dismissal.
+assert "BOOL needsRecovery = CCBGControlCenterPresentationVisible && overlay.window && !overlay.hidden && !overlay.player.currentItem;" in prewarm_body
 show_body = module.split("- (void)showCurrentMediaWithTransition:", 1)[1].split("- (void)preloadNextMedia", 1)[0]
 assert "if (self.currentItem && self.expanded) [self updateAdaptiveExpandedSizeForItem:self.currentItem];" in reload_body
 assert "if (self.expanded) [self updateAdaptiveExpandedSizeForItem:self.currentItem];" in show_body
@@ -308,6 +313,33 @@ root_schedule_body = overlay.rsplit("static void CCBGSchedulePresentationRootReb
 assert "CCBGScheduleTrackedOverlayRefreshes();" not in root_schedule_body
 assert "@[@0.12, @0.42]" in root_schedule_body
 assert "CCBGRebindPresentationRootControllers(root)" in root_schedule_body
+assert "!CCBGControlCenterPresentationVisible" in root_schedule_body
+tracked_schedule_body = overlay.rsplit("static void CCBGScheduleTrackedOverlayRefreshes", 1)[1].split("static void CCBGScheduleTrackedOverlayRefreshOnce", 1)[0]
+assert "!CCBGControlCenterPresentationVisible" in tracked_schedule_body
+environment_body = overlay.split("- (void)environmentDidChange:", 1)[1].split("- (void)applySceneLowPowerPolicy", 1)[0]
+assert environment_body.count("if (!CCBGControlCenterPresentationVisible)") >= 2
+focus_change_body = overlay.split("static void CCBGHandleFocusActivityChange", 1)[1].split("static void CCBGScheduleFocusRefreshes", 1)[0]
+assert "if (CCBGControlCenterPresentationVisible) CCBGPostReload();" in focus_change_body
+network_monitor_body = overlay.split("static void CCBGStartNetworkMonitoring", 1)[1].split("static __attribute__((noinline)) void CCBGSystemOverlayStart", 1)[0]
+assert "if (!CCBGControlCenterPresentationVisible) return;" in network_monitor_body
+# A full-screen third-party takeover hides all other Clean video surfaces.
+# Their AVPlayers must be paused while they cannot be seen, then resumed when
+# the takeover collapses; otherwise all modules continue decoding underneath.
+arbitration_body = overlay.split("static void CCBGShowOverlayWithPresentationArbitration", 1)[1].split("static void CCBGDetachOverlayViewNow", 1)[0]
+assert "CCBGExpandedTakeoverOverlay(views)" in arbitration_body
+assert "[candidate setPlaybackVisible:NO];" in arbitration_body
+assert "[candidate setPlaybackVisible:YES];" in arbitration_body
+# Expanded next-item warmup is optional. It must not retain an AVAsset or keep
+# generating a cover after the module leaves Control Center, and the existing
+# performance switch must disable the extra decode work completely.
+assert "- (void)clearPreloadedNextMedia" in module
+preload_body = module.split("- (void)preloadNextMedia", 1)[1].split("- (void)rememberCurrentItem", 1)[0]
+assert "[self clearPreloadedNextMedia];" in preload_body
+assert "!self.visible || !self.view.window" in preload_body
+assert 'CCBGModulePreference(@"performanceMode", @NO)' in preload_body
+assert "self.preloadImageGenerator" in preload_body
+module_disappear_body = module.split("- (void)viewDidDisappear:", 1)[1].split("- (void)traitCollectionDidChange:", 1)[0]
+assert "[self clearPreloadedNextMedia];" in module_disappear_body
 set_visible_block = overlay.rsplit("- (void)setPlaybackVisible:(BOOL)visible", 1)[1].split("- (void)restoreSuppressedArtwork", 1)[0]
 assert "self.player.currentItem.status != AVPlayerItemStatusReadyToPlay" in set_visible_block
 assert "|| self.imageView.image != nil" not in set_visible_block
@@ -411,6 +443,61 @@ assert "convergenceGeneration" in convergence
 assert "cancel" in convergence.lower() or "generation" in convergence.lower()
 assert "lastConvergenceDiagnosticSignature" in module
 assert 'isEqualToString:@"playback-start"' in shared
+
+# Once time-range automation was removed, the fallback environment poll must
+# not force five modules through a full reload at every minute boundary. It
+# also must never run a delayed refresh after Control Center has disappeared.
+environment_signature = module.rsplit("- (NSString *)currentEnvironmentSignature", 1)[1].split("- (void)environmentDidChange:", 1)[0]
+assert "minute=" not in environment_signature
+assert "weekday=" not in environment_signature
+environment_change = module.rsplit("- (void)environmentDidChange:", 1)[1].split("- (void)scheduleEnvironmentRefresh", 1)[0]
+assert "!self.visible || !self.view.window || !CCBGPluginEnabled()" in environment_change
+assert "if (needsOrientationRefresh) [self scheduleEnvironmentRefresh];" in environment_change
+environment_timer = module.rsplit("- (void)startEnvironmentTimer", 1)[1].split("- (NSArray<NSDictionary *> *)eligibleItems", 1)[0]
+assert "scheduledTimerWithTimeInterval:30.0" in environment_timer
+assert "self.environmentTimer.tolerance = 5.0" in environment_timer
+assert "[timer invalidate]" in environment_timer
+environment_settled = module.rsplit("- (void)scheduleEnvironmentRefresh", 1)[1].split("- (void)startEnvironmentTimer", 1)[0]
+assert "!self.visible || !self.view.window || !CCBGPluginEnabled()" in environment_settled
+
+# A preference notification received after Control Center closes must leave
+# enabled overlays stale for the next presentation rather than rebuilding
+# hidden AVPlayer/layout hierarchies. Disabling the plugin remains immediate
+# because the native module must be restored even while the sheet is closed.
+overlay_reload = overlay.rsplit("static void CCBGSystemOverlayReload", 1)[1].split("static void CCBGSystemOverlayPresentationRecovery", 1)[0]
+assert "CCBGSystemOverlayReloadScheduled" in overlay_reload
+assert "if (CCBGSystemOverlayReloadScheduled) return;" in overlay_reload
+assert "CCBGSystemOverlayReloadScheduled = NO;" in overlay_reload
+assert "BOOL presentationVisible = CCBGControlCenterPresentationVisible;" in overlay_reload
+assert "if (!pluginEnabled || !enabled)" in overlay_reload
+assert "if (!presentationVisible)" in overlay_reload
+assert "overlay.configurationSignature = nil;" in overlay_reload
+assert "if (pluginEnabled && !locked && presentationVisible)" in overlay_reload
+
+# Image-load callbacks can arrive in large bursts during SpringBoard startup.
+# Hook installation is idempotent, but scheduling it per image creates a main
+# thread queue backlog right before Control Center is first opened.
+image_loaded = overlay.rsplit("static void CCBGImageLoaded", 1)[1].split("static void CCBGSystemOverlayReload", 1)[0]
+assert "CCBGScheduleHookInstallation();" in image_loaded
+hook_schedule = overlay.rsplit("static void CCBGScheduleHookInstallation", 1)[1].split("static void CCBGImageLoaded", 1)[0]
+assert "BOOL shouldSchedule = NO;" in hook_schedule
+assert "if (!CCBGHookInstallScheduled)" in hook_schedule
+assert "CCBGHookInstallScheduled = NO;" in hook_schedule
+assert "@synchronized (CCBGHookInstallationLock())" in hook_schedule
+
+# An expanded system module can disappear while Control Center itself is
+# dismissing. Its compact peer must not be resumed once the shared presentation
+# session is already inactive.
+hide_controller = overlay.rsplit("static void CCBGHideController", 1)[1].split("static BOOL CCBGClassIsSubclassOf", 1)[0]
+assert "if (!CCBGControlCenterPresentationVisible) return;" in hide_controller
+
+# Size queries are invoked repeatedly during Control Center layout. Normal
+# display can use a longer preference cache, while CCAster edit mode keeps a
+# short window so the drag remains live.
+ccaster_grid_read = module.rsplit("static BOOL CCBGReadCCAsterGridSize", 1)[1].split("static CCUILayoutSize CCBGRuntimeModuleSize", 1)[0]
+assert "CCBGIsCCAsterEditModeActive(controller.viewIfLoaded) ? 0.10 : 2.0" in ccaster_grid_read
+runtime_grid_read = module.rsplit("static CCUILayoutSize CCBGRuntimeModuleSize", 1)[1].split("static BOOL CCBGCurrentInterfaceIsLandscape", 1)[0]
+assert "now - CCBGLastRuntimeGridReadAt >= 2.0" in runtime_grid_read
 
 # Replay must expose a useful empty state and acknowledge a successful tap.
 assert "CCBGSceneTimeline()" in director

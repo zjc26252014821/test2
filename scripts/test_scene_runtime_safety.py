@@ -50,8 +50,11 @@ assert "setValueCommittedHandler" not in CONTROLS_HEADER
 # Memory pressure must release rebuildable preloads instead of only recording
 # telemetry. The current AVPlayerItem remains retained by its player.
 module_memory = MODULE.rsplit("- (void)mediaMemoryWarning:", 1)[1].split("- (BOOL)shouldUseSceneLowPowerCover", 1)[0]
-for token in ("self.preloadedImage = nil", "self.preloadedAsset = nil", "removeAllObjects"):
+for token in ("[self clearPreloadedNextMedia]", "removeAllObjects"):
     assert token in module_memory
+preload_cleanup = MODULE.rsplit("- (void)clearPreloadedNextMedia", 1)[1].split("- (void)rememberCurrentItem", 1)[0]
+for token in ("cancelAllCGImageGeneration", "cancelLoading", "self.preloadedImage = nil", "self.preloadedAsset = nil"):
+    assert token in preload_cleanup
 overlay_memory = OVERLAY.rsplit("- (void)mediaMemoryWarning:", 1)[1].split("- (void)environmentDidChange:", 1)[0]
 for token in ("[CCBGPreloadedOverlayAssets removeAllObjects]", "[CCBGPreloadedOverlayFrames removeAllObjects]", "CCBGPreloadedOverlayCatalog = nil"):
     assert token in overlay_memory
@@ -393,6 +396,7 @@ assert "needsOrientationRefresh" in environment_change
 assert "        }\n        if (needsOrientationRefresh)" in environment_change
 runtime_persistence = environment_change.split("if (self.player.currentItem", 1)[1].split("NSDictionary *scene", 1)[0]
 assert "CCBGRecordModuleRuntimeState" in runtime_persistence
+assert "lastRuntimePersistAt >= 30.0" in runtime_persistence
 assert "CFPreferencesSetAppValue" not in runtime_persistence
 assert "CFPreferencesAppSynchronize" not in runtime_persistence
 runtime_writer = function_body(
@@ -580,7 +584,7 @@ assert "CCBGLastRuntimeSizeLogSignature" in runtime_size
 assert "if (![signature isEqualToString:CCBGLastRuntimeSizeLogSignature])" in runtime_size
 assert "CCBGHasCachedRuntimeGridSize" in runtime_size
 assert "CCBGLastRuntimeGridReadAt" in runtime_size
-assert "if (!CCBGHasCachedRuntimeGridSize || now - CCBGLastRuntimeGridReadAt >= 0.5)" in runtime_size
+assert "if (!CCBGHasCachedRuntimeGridSize || now - CCBGLastRuntimeGridReadAt >= 2.0)" in runtime_size
 reload_callback = function_body(MODULE, "static void CCBGReloadCallback(", "static void CCBGPresentationRecoveryCallback(")
 assert "CCBGHasCachedRuntimeGridSize = NO" in reload_callback
 

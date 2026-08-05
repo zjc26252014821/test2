@@ -124,7 +124,7 @@ def main() -> None:
         "loadValuesAsynchronouslyForKeys", "self.preferredContentSize = size",
         "applyModuleAppearance", "kCAMediaTimingFunctionEaseInEaseOut",
         "UITableViewDataSource", "playerLayer.masksToBounds = YES",
-        "lastRuntimePersistAt", "now - self.lastRuntimePersistAt >= 10.0",
+        "lastRuntimePersistAt", "now - self.lastRuntimePersistAt >= 30.0",
         "compactTap", "handleCompactTap:", "presentationHostController",
         "playbackQueueForItems:", "automationOverrideActive",
         "UISearchResultsUpdating", "visiblePickerItems", "pendingPickerThumbnailCallbacks",
@@ -328,7 +328,7 @@ def main() -> None:
     assert "dragStillActive" in layout
     assert "self.view.frame = self.resizePreviewFrame;" in layout
     assert 'CCBGReadPreference(@"fallbackColor"' not in module_source
-    assert "scheduledTimerWithTimeInterval:10.0 repeats:YES" in module_source
+    assert "scheduledTimerWithTimeInterval:30.0 repeats:YES" in module_source
     environment_signature = module_source.split("- (NSString *)currentEnvironmentSignature", 1)[1].split("- (void)environmentDidChange", 1)[0]
     assert "CCBGLoadMediaCatalog" not in environment_signature
     assert "UIViewPropertyAnimator" in module_source
@@ -687,7 +687,7 @@ def main() -> None:
     assert "reloadAfterPreferenceChange" in system_reload
     assert "reloadIfNeeded:YES" not in system_reload
     prewarm_reload = overlay_source.split("static void CCBGPrewarmOverlayMedia", 1)[1].split("static void CCBGScheduleStartupOverlayRefreshes", 1)[0]
-    assert "BOOL needsRecovery = overlay.window && !overlay.hidden && !overlay.player.currentItem;" in prewarm_reload
+    assert "BOOL needsRecovery = CCBGControlCenterPresentationVisible && overlay.window && !overlay.hidden && !overlay.player.currentItem;" in prewarm_reload
     assert "if (!needsRecovery) continue;" in prewarm_reload
     assert "[overlay reloadAfterPreferenceChange];" in prewarm_reload
     assert "reloadIfNeeded:YES" not in prewarm_reload
@@ -714,7 +714,8 @@ def main() -> None:
     assert "[host addChildViewController:controller]" not in overlay_source
     assert "[host addChildViewController:native]" in overlay_source
     assert "[native didMoveToParentViewController:host]" in overlay_source
-    assert "CCBGViewHostController(self.superview) ?: self.hostController" in overlay_source
+    assert "CCBGTakeoverRootController(self.hostController, self)" in overlay_source
+    assert "[mountedView isDescendantOfView:candidateView]" in overlay_source
     assert "nativePlayerHostController" not in overlay_source
     assert "attachNativePlayerControllerToHost" in overlay_source
     assert "removeFromParentViewController" in overlay_source
@@ -988,9 +989,10 @@ def main() -> None:
     assert "self.player.currentItem" not in mounted_reload
     for token in (
         "CCBGRefreshModulePreferenceSnapshot", "CFPreferencesCopyMultiple", "lastPreferencesReloadAt",
-        "scheduledTimerWithTimeInterval:10.0", "self.environmentTimer.tolerance = 2.0",
+        "scheduledTimerWithTimeInterval:30.0", "self.environmentTimer.tolerance = 5.0",
         "QOS_CLASS_UTILITY",
-        "if (!self.expanded || ![CCBGModulePreference(@\"preloadEnabled\"",
+        "!self.visible || !self.view.window || !self.expanded ||",
+        "CCBGModulePreference(@\"preloadEnabled\"", "CCBGModulePreference(@\"performanceMode\"",
     ):
         assert token in module_source, token
     assert "@synchronized (NSProcessInfo.processInfo)" not in module_source

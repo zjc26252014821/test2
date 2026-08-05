@@ -120,7 +120,10 @@ assert "CCBGTrackedOverlayControllers" in overlay
 assert "CCBGRefreshTrackedOverlayControllers" in overlay
 assert "CCBGUpdateOrLayoutController(controller, kind)" in overlay
 assert "CCBGRefreshTrackedOverlayControllers();" in overlay
-assert "if (!controller.isViewLoaded) continue;" in overlay
+# Master-switch recovery should not rebuild offscreen controller trees. An
+# on-screen controller is the only one that can need a visible media/player
+# recovery; refreshing hidden ones starts unnecessary AVFoundation work.
+assert "if (!controller.isViewLoaded || !controller.view.window) continue;" in overlay
 assert "hostController.view.window || hostController.view.superview" in overlay
 assert "CCBGSystemOverlayPresentationRecovery" in overlay
 assert "CCBGPresentationRecoveryNotificationName" in overlay

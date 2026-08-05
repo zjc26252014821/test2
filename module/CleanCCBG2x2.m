@@ -306,7 +306,8 @@ static BOOL CCBGReadCCAsterGridSize(id controller, CCUILayoutSize *size) {
     // CCAster writes continuously only while its resize shield is active.
     // Outside that deliberate edit gesture, avoid having each Clean module
     // synchronize the external preference domain on every layout burst.
-    NSTimeInterval cacheInterval = CCBGIsCCAsterEditModeActive(controller.viewIfLoaded) ? 0.10 : 2.0;
+    UIView *controllerView = [(UIViewController *)controller viewIfLoaded];
+    NSTimeInterval cacheInterval = CCBGIsCCAsterEditModeActive(controllerView) ? 0.10 : 2.0;
     if (!CCBGHasCachedCCAsterGridSizes || now - CCBGLastCCAsterGridReadAt >= cacheInterval) {
         // CCAster is written by the settings app but read from SpringBoard.
         // Keep a short cache because Control Center asks for module size many

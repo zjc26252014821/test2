@@ -40,6 +40,10 @@ jobs:
           python3 scripts/validate_source.py 2>&1 | tee packages/validate-source.log
           python3 scripts/test_2_3_regressions.py 2>&1 | tee packages/2-3-regressions.log
           python3 scripts/test_reported_module_behavior.py 2>&1 | tee packages/reported-module-behavior.log
+          python3 scripts/test_async_media_failure.py 2>&1 | tee packages/async-media-failure.log
+          python3 scripts/test_inactive_slideshow.py 2>&1 | tee packages/inactive-slideshow.log
+          python3 scripts/test_overlay_native_player_containment.py 2>&1 | tee packages/overlay-native-player-containment.log
+          python3 scripts/test_overlay_picker_thumbnail_loading.py 2>&1 | tee packages/overlay-picker-thumbnail-loading.log
           python3 scripts/test_scene_runtime_safety.py 2>&1 | tee packages/scene-runtime-safety.log
           python3 scripts/test_scene_simplification.py 2>&1 | tee packages/scene-simplification.log
           python3 scripts/test_scene_switch_behavior.py 2>&1 | tee packages/scene-switch-behavior.log
@@ -86,6 +90,10 @@ jobs:
           elif [ -f packages/validate-source.log ]; then
             cat packages/validate-source.log > "$RUNNER_TEMP/build-error.txt"
             if [ -f packages/reported-module-behavior.log ]; then cat packages/reported-module-behavior.log >> "$RUNNER_TEMP/build-error.txt"; fi
+            if [ -f packages/async-media-failure.log ]; then cat packages/async-media-failure.log >> "$RUNNER_TEMP/build-error.txt"; fi
+            if [ -f packages/inactive-slideshow.log ]; then cat packages/inactive-slideshow.log >> "$RUNNER_TEMP/build-error.txt"; fi
+            if [ -f packages/overlay-native-player-containment.log ]; then cat packages/overlay-native-player-containment.log >> "$RUNNER_TEMP/build-error.txt"; fi
+            if [ -f packages/overlay-picker-thumbnail-loading.log ]; then cat packages/overlay-picker-thumbnail-loading.log >> "$RUNNER_TEMP/build-error.txt"; fi
             if [ -f packages/scene-runtime-safety.log ]; then cat packages/scene-runtime-safety.log >> "$RUNNER_TEMP/build-error.txt"; fi
             if [ -f packages/scene-simplification.log ]; then cat packages/scene-simplification.log >> "$RUNNER_TEMP/build-error.txt"; fi
             if [ -f packages/scene-switch-behavior.log ]; then cat packages/scene-switch-behavior.log >> "$RUNNER_TEMP/build-error.txt"; fi

@@ -1578,6 +1578,8 @@ static void CCBGPresentationRecoveryCallback(
     [self setExpandedInteractionEnabled:NO];
     self.pendingManualAdvanceOffset = 0;
     [self clearPreloadedNextMedia];
+    [self.slideTimer invalidate];
+    self.slideTimer = nil;
     [self.environmentTimer invalidate];
     [self.videoWatchdog invalidate];
     self.environmentTimer = nil;
@@ -4733,6 +4735,7 @@ static void CCBGPresentationRecoveryCallback(
     NSTimeInterval interval = MIN(3600.0, MAX(2.0, configured > 0 ? configured : [CCBGModulePreference(@"slideshowInterval", @8) doubleValue]));
     __weak typeof(self) weakSelf = self;
     self.slideTimer = [NSTimer scheduledTimerWithTimeInterval:interval repeats:NO block:^(NSTimer *timer) {
+        if (!weakSelf || !weakSelf.visible || !weakSelf.view.window) return;
         [weakSelf advanceBy:1];
     }];
 }
@@ -4742,6 +4745,7 @@ static void CCBGPresentationRecoveryCallback(
         dispatch_async(dispatch_get_main_queue(), ^{ [self advanceBy:offset]; });
         return;
     }
+    if (!self.visible || !self.view.window) return;
     if (!self.mediaItems.count) return;
     NSInteger mode = [CCBGModulePreference(@"playbackMode", @0) integerValue];
     if (mode == 0 || self.automationOverrideActive) return;

@@ -147,7 +147,10 @@ assert "takeoverBackdrop" in SOURCE
 assert "CCBGResetTakeoverPresentationState" in SOURCE
 assert "CCBGClearGenericExpandedStateForKind(overlay.kind)" in SOURCE
 reload_lock_body = SOURCE.split("static void CCBGSystemOverlayReload", 1)[1].split("static void CCBGSystemOverlayPresentationRecovery", 1)[0]
-assert "if (CCBGSystemIsLocked())" in reload_lock_body
+# The lock state is sampled once, then reused throughout the coalesced
+# reload. Test that behavior rather than requiring a specific if expression.
+assert "BOOL locked = CCBGSystemIsLocked();" in reload_lock_body
+assert "if (locked)" in reload_lock_body
 assert "overlay.expandedPresentation = NO;" in reload_lock_body
 assert "viewDidDisappear:" in SOURCE.split("static void CCBGHookControlCenterPresentationClass", 1)[1].split("static UIViewController *CCBGViewHostController", 1)[0]
 assert "[overlay installInteractionsOnHostView:interactionHost controller:controller];" in layout_backdrop_body

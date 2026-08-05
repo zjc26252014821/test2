@@ -40,7 +40,10 @@ assert "self.imageView.image = nil;" in overlay
 assert "if (!CCBGControlCenterPresentationVisible)" in overlay
 assert "for (CCBGSystemOverlayView *overlay in (locked ? @[] : views))" in overlay
 assert "[native willMoveToParentViewController:nil]" in overlay
-assert "[self attachNativePlayerControllerToHost:[self nativePlayerPresentationHost]]" in overlay
+# Recovery must reuse the validated presentation host and refuse to move
+# AVKit's view if controller containment cannot be established.
+assert "[self attachNativePlayerControllerToHost:presentationHost]" in overlay
+assert "if (native.parentViewController != presentationHost) return;" in overlay
 assert "[host addChildViewController:controller]" not in overlay
 assert "[controller didMoveToParentViewController:host]" not in overlay
 assert "nativePlayerHostController" not in overlay
@@ -50,7 +53,7 @@ assert "CCBGTouchIsNativeTransportControl" in overlay
 assert "touchTargetsNativePlayer && CCBGTouchIsNativeTransportControl" in overlay
 assert "if (hasVideo) [self attachNativePlayerControllerToHost:host];" in overlay
 assert "delayValue.doubleValue >= 0.45" in overlay
-assert "delayValue.doubleValue >= 1.20" in overlay
+assert "delayValue.doubleValue >= 2.80" in overlay
 assert "CCBGOverlayUsesCleanTakeover(self) && self.expandedPresentation" in overlay
 assert "- (void)updateNativePlayerPresentation" in overlay
 assert "- (void)detachNativePlayerForCompactPresentation" in overlay

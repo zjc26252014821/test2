@@ -650,18 +650,39 @@ static NSArray<NSDictionary *> *CCBGAvailableOverlayItems(void) {
 @property(nonatomic, copy) void (^selectionHandler)(NSString *fileName);
 @property(nonatomic, strong) UISearchController *searchController;
 @property(nonatomic, strong) UISegmentedControl *scopeControl;
+@property(nonatomic, strong) NSCache<NSString *, UIImage *> *thumbnailCache;
+@property(nonatomic, strong) NSMutableSet<NSString *> *thumbnailRequests;
 - (instancetype)initWithItems:(NSArray<NSDictionary *> *)items playlistItems:(NSArray<NSDictionary *> *)playlistItems selectedName:(NSString *)selectedName selectionHandler:(void (^)(NSString *fileName))selectionHandler;
+- (NSString *)overlayPickerThumbnailKeyForItem:(NSDictionary *)item;
+- (UIImage *)cachedOverlayPickerThumbnailForItem:(NSDictionary *)item;
+- (void)loadOverlayPickerThumbnailForItem:(NSDictionary *)item;
 @end
 
 static UIImage *CCBGOverlayPickerThumbnailForItem(NSDictionary *item) {
     NSData *frameData = [NSData dataWithContentsOfFile:CCBGOverlayFrameCachePath(item)];
     UIImage *frame = frameData.length ? [UIImage imageWithData:frameData] : nil;
     if (frame) return frame;
-    if (!CCBGIsVideoName(item[@"fileName"])) {
-        UIImage *image = [UIImage imageWithContentsOfFile:CCBGPathForItem(item)];
-        if (image) return image;
+    NSString *fileName = item[@"fileName"] ?: @"";
+    if (!CCBGIsVideoName(fileName)) {
+        NSURL *url = [NSURL fileURLWithPath:CCBGPathForItem(item) ?: @""];
+        CGImageSourceRef source = CGImageSourceCreateWithURL((__bridge CFURLRef)url, NULL);
+        if (source) {
+            NSDictionary *options = @{
+                (__bridge NSString *)kCGImageSourceCreateThumbnailFromImageAlways: @YES,
+                (__bridge NSString *)kCGImageSourceCreateThumbnailWithTransform: @YES,
+                (__bridge NSString *)kCGImageSourceThumbnailMaxPixelSize: @160,
+                (__bridge NSString *)kCGImageSourceShouldCacheImmediately: @YES,
+            };
+            CGImageRef image = CGImageSourceCreateThumbnailAtIndex(source, 0, (__bridge CFDictionaryRef)options);
+            CFRelease(source);
+            if (image) {
+                UIImage *thumbnail = [UIImage imageWithCGImage:image];
+                CGImageRelease(image);
+                return thumbnail;
+            }
+        }
     }
-    return [UIImage systemImageNamed:CCBGIsVideoName(item[@"fileName"]) ? @"video.fill" : @"photo.fill"];
+    return [UIImage systemImageNamed:CCBGIsVideoName(fileName) ? @"video.fill" : @"photo.fill"];
 }
 
 @implementation CCBGOverlayMediaPickerController
@@ -673,6 +694,10 @@ static UIImage *CCBGOverlayPickerThumbnailForItem(NSDictionary *item) {
     _items = _allItems;
     _selectedName = [selectedName copy] ?: @"";
     _selectionHandler = [selectionHandler copy];
+    _thumbnailCache = [NSCache new];
+    _thumbnailCache.countLimit = 48;
+    _thumbnailCache.totalCostLimit = 12 * 1024 * 1024;
+    _thumbnailRequests = [NSMutableSet set];
     self.title = @"选择视频";
     return self;
 }
@@ -732,6 +757,43 @@ static UIImage *CCBGOverlayPickerThumbnailForItem(NSDictionary *item) {
 
 - (NSArray<NSDictionary *> *)visibleItems { return self.filteredItems ?: self.items; }
 
+- (NSString *)overlayPickerThumbnailKeyForItem:(NSDictionary *)item {
+    NSString *fileName = [item[@"fileName"] isKindOfClass:NSString.class] ? item[@"fileName"] : @"";
+    return [NSString stringWithFormat:@"%@|%.3f", fileName, [item[@"startTime"] doubleValue]];
+}
+
+- (UIImage *)cachedOverlayPickerThumbnailForItem:(NSDictionary *)item {
+    return [self.thumbnailCache objectForKey:[self overlayPickerThumbnailKeyForItem:item]];
+}
+
+- (void)loadOverlayPickerThumbnailForItem:(NSDictionary *)item {
+    NSString *key = [self overlayPickerThumbnailKeyForItem:item];
+    if (!key.length || [self.thumbnailCache objectForKey:key] || [self.thumbnailRequests containsObject:key]) return;
+    [self.thumbnailRequests addObject:key];
+    NSDictionary *snapshot = [item copy];
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        UIImage *thumbnail = CCBGOverlayPickerThumbnailForItem(snapshot);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) self = weakSelf;
+            if (!self) return;
+            [self.thumbnailRequests removeObject:key];
+            if (thumbnail) {
+                CGImageRef image = thumbnail.CGImage;
+                NSUInteger cost = image ? CGImageGetWidth(image) * CGImageGetHeight(image) * 4 : 0;
+                [self.thumbnailCache setObject:thumbnail forKey:key cost:cost];
+            }
+            NSMutableArray<NSIndexPath *> *visibleMatches = [NSMutableArray array];
+            for (NSIndexPath *indexPath in self.tableView.indexPathsForVisibleRows ?: @[]) {
+                if (indexPath.row < 0 || indexPath.row >= (NSInteger)self.visibleItems.count) continue;
+                NSDictionary *visibleItem = self.visibleItems[(NSUInteger)indexPath.row];
+                if ([[self overlayPickerThumbnailKeyForItem:visibleItem] isEqualToString:key]) [visibleMatches addObject:indexPath];
+            }
+            if (visibleMatches.count) [self.tableView reloadRowsAtIndexPaths:visibleMatches withRowAnimation:UITableViewRowAnimationNone];
+        });
+    });
+}
+
 - (void)scrollToSelectedItemIfNeeded {
     if (!self.selectedName.length) return;
     NSUInteger itemIndex = [self.visibleItems indexOfObjectPassingTest:^BOOL(NSDictionary *item, NSUInteger index, BOOL *stop) {
@@ -754,7 +816,12 @@ static UIImage *CCBGOverlayPickerThumbnailForItem(NSDictionary *item) {
     NSString *fileName = item[@"fileName"] ?: @"";
     cell.textLabel.text = CCBGDisplayNameForItem(item);
     cell.detailTextLabel.text = fileName;
-    cell.imageView.image = CCBGOverlayPickerThumbnailForItem(item);
+    UIImage *thumbnail = [self cachedOverlayPickerThumbnailForItem:item];
+    if (!thumbnail) {
+        [self loadOverlayPickerThumbnailForItem:item];
+        thumbnail = [UIImage systemImageNamed:CCBGIsVideoName(fileName) ? @"video.fill" : @"photo.fill"];
+    }
+    cell.imageView.image = thumbnail;
     cell.imageView.contentMode = UIViewContentModeScaleAspectFill;
     cell.imageView.clipsToBounds = YES;
     cell.imageView.layer.cornerRadius = 7.0;
@@ -1176,7 +1243,9 @@ static UIImageView *CCBGArtworkViewInView(UIView *root, UIView *excluded) {
     if (responderHost && responderHost.isViewLoaded && [self isDescendantOfView:responderHost.view]) {
         return responderHost;
     }
-    return self.hostController;
+    UIViewController *fallbackHost = self.hostController;
+    if (fallbackHost.isViewLoaded && [self isDescendantOfView:fallbackHost.view]) return fallbackHost;
+    return nil;
 }
 
 - (void)updateNativePlayerPresentation {
@@ -1186,6 +1255,19 @@ static UIImageView *CCBGArtworkViewInView(UIView *root, UIView *excluded) {
     BOOL ready = hasVideo && (playerItem.status == AVPlayerItemStatusReadyToPlay ||
                               self.nativePlayerPresentationFallbackVisible);
     UIViewController *host = [self nativePlayerPresentationHost];
+    // Control Center can reparent the takeover view before its new owner is
+    // present in the responder/controller chain. AVKit must stay detached in
+    // that gap: adding its view without an owning child controller corrupts
+    // UIKit containment and can crash SpringBoard during the next transition.
+    if (hasVideo && !host) {
+        // Control Center briefly has no owning controller while it reparents
+        // the takeover view. Keep AVKit attached to its last valid parent and
+        // let the recovery pass retry once the new host is mounted. Treating
+        // this transient gap as compact would cancel the recovery generation
+        // and leave the native controls permanently absent.
+        [self scheduleNativePlayerPresentationRecovery];
+        return;
+    }
     if (hasVideo && !self.nativePlayerController) {
         AVPlayerViewController *controller = [AVPlayerViewController new];
         controller.updatesNowPlayingInfoCenter = NO;
@@ -1258,7 +1340,7 @@ static UIImageView *CCBGArtworkViewInView(UIView *root, UIView *excluded) {
     if (self.nativePresentationRecoveryArmed) return;
     self.nativePresentationRecoveryArmed = YES;
     NSUInteger generation = ++self.nativePresentationRecoveryGeneration;
-    NSArray<NSNumber *> *delays = @[@0.0, @0.05, @0.18, @0.45, @0.80, @1.20];
+    NSArray<NSNumber *> *delays = @[@0.0, @0.05, @0.18, @0.45, @0.80, @1.20, @1.80, @2.80];
     __weak typeof(self) weakSelf = self;
     for (NSNumber *delayValue in delays) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delayValue.doubleValue * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -1273,6 +1355,11 @@ static UIImageView *CCBGArtworkViewInView(UIView *root, UIView *excluded) {
             AVPlayerItem *item = self.player.currentItem;
             if (delayValue.doubleValue >= 0.45 && item.status != AVPlayerItemStatusFailed) {
                 self.nativePlayerPresentationFallbackVisible = YES;
+            }
+            UIViewController *presentationHost = [self nativePlayerPresentationHost];
+            if (!presentationHost) {
+                if (delayValue.doubleValue >= 2.80) self.nativePresentationRecoveryArmed = NO;
+                return;
             }
             UIView *expectedHost = self.mediaContainerView;
             CGRect expectedFrame = expectedHost.bounds;
@@ -1289,7 +1376,8 @@ static UIImageView *CCBGArtworkViewInView(UIView *root, UIView *excluded) {
             if (needsRepair) [self updateNativePlayerPresentation];
             native = self.nativePlayerController;
             if (native) {
-                [self attachNativePlayerControllerToHost:[self nativePlayerPresentationHost]];
+                [self attachNativePlayerControllerToHost:presentationHost];
+                if (native.parentViewController != presentationHost) return;
                 if (native.player != self.player) native.player = self.player;
                 if (native.view.superview != expectedHost) {
                     [native.view removeFromSuperview];
@@ -1302,7 +1390,7 @@ static UIImageView *CCBGArtworkViewInView(UIView *root, UIView *excluded) {
                 native.showsPlaybackControls = YES;
                 [expectedHost bringSubviewToFront:native.view];
             }
-            if (delayValue.doubleValue >= 1.20) self.nativePresentationRecoveryArmed = NO;
+            if (delayValue.doubleValue >= 2.80) self.nativePresentationRecoveryArmed = NO;
         });
     }
 }

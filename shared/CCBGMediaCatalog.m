@@ -3340,6 +3340,40 @@ void CCBGRecordMediaPlaybackFailure(NSString *fileName, NSString *reason) {
     CCBGRecordSceneTimelineEvent(@"playback-failure", @{ @"media": fileNameCopy, @"reason": reasonCopy });
 }
 
+// A decode failure is delivered on the AVFoundation/SpringBoard path. Never
+// wait for the cross-process analytics lock there: the immediate caller has
+// already detached the bad item, while this serial mutation persists its
+// quarantine and posts the reload only after the catalog is durable.
+static void CCBGSetMediaFailureAsync(NSString *fileName, NSString *reason) {
+    if (!fileName.length) return;
+    NSString *fileNameCopy = [fileName copy];
+    NSString *reasonCopy = [reason copy] ?: @"";
+    CCBGEnqueueAnalyticsMutation(^{
+        id storedCatalog = CCBGReadPreference(@"mediaCatalog", @[]);
+        NSMutableArray *catalog = [storedCatalog isKindOfClass:NSArray.class] ? [storedCatalog mutableCopy] : [CCBGLoadMediaCatalog() mutableCopy];
+        if (!catalog) catalog = [NSMutableArray array];
+        NSUInteger index = [catalog indexOfObjectPassingTest:^BOOL(NSDictionary *item, NSUInteger idx, BOOL *stop) {
+            return [item[@"fileName"] isEqualToString:fileNameCopy];
+        }];
+        BOOL updated = NO;
+        if (index != NSNotFound) {
+            NSMutableDictionary *item = [catalog[index] mutableCopy];
+            item[@"failureReason"] = reasonCopy;
+            if (reasonCopy.length) {
+                item[@"healthFailureCount"] = @([item[@"healthFailureCount"] unsignedLongLongValue] + 1);
+                item[@"healthLastFailureAt"] = @(NSDate.date.timeIntervalSince1970);
+                item[@"healthLastFailureReason"] = reasonCopy;
+            }
+            CCBGSaveHealthCatalog(catalog, index, item);
+            updated = YES;
+        }
+        if (updated && reasonCopy.length) {
+            CCBGRecordSceneTimelineEvent(@"playback-failure", @{ @"media": fileNameCopy, @"reason": reasonCopy });
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{ CCBGPostReload(); });
+    });
+}
+
 static void CCBGSetMediaFailure(NSString *fileName, NSString *reason) {
     if (!fileName.length) return;
     NSString *fileNameCopy = [fileName copy];
@@ -3361,8 +3395,7 @@ static void CCBGSetMediaFailure(NSString *fileName, NSString *reason) {
 }
 
 void CCBGMarkMediaFailure(NSString *fileName, NSString *reason) {
-    CCBGSetMediaFailure(fileName, reason.length ? reason : @"无法解码");
-    CCBGPostReload();
+    CCBGSetMediaFailureAsync(fileName, reason.length ? reason : @"无法解码");
 }
 
 void CCBGClearMediaFailure(NSString *fileName) {

@@ -262,6 +262,7 @@ static void CCBGSchedulePresentationRootRebind(void);
 static void CCBGRebindPresentationRootControllers(UIViewController *root);
 static void CCBGUpdateGenericContainerController(UIViewController *controller);
 static UIViewController *CCBGViewHostController(UIView *view);
+static BOOL CCBGSystemIsLocked(void);
 static id CCBGValueForKeyIfAvailable(id object, NSString *key);
 static BOOL CCBGControllerIsExpandedPresentation(UIViewController *controller, CCBGSystemOverlayKind kind);
 static void CCBGSetGenericExpandedState(UIViewController *controller, BOOL expanded);

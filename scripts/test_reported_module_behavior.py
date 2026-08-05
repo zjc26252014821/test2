@@ -128,6 +128,11 @@ assert "hostController.view.window || hostController.view.superview" in overlay
 assert "CCBGSystemOverlayPresentationRecovery" in overlay
 assert "CCBGPresentationRecoveryNotificationName" in overlay
 presentation_hook = overlay.split("static void CCBGHookControlCenterPresentationClass", 1)[1].split("static UIViewController *CCBGViewHostController", 1)[0]
+assert "CCBGControlCenterPresentationVisible = YES;" in presentation_hook
+assert "CCBGControlCenterPresentationVisible = NO;" in presentation_hook
+assert "if (controller != CCBGLastPresentationRoot) return;" in presentation_hook
+assert "[overlay suspendForInactiveControlCenterPresentation];" in overlay
+assert "if (!CCBGControlCenterPresentationVisible)" in overlay
 assert "CCBGApplyVisualThemeAutomationIfNeeded(controller.view);" in presentation_hook
 assert "CCBGSchedulePresentationRootRebind();" in presentation_hook
 assert "CCBGScheduleTrackedOverlayRefreshes();" not in presentation_hook

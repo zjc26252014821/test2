@@ -168,6 +168,7 @@ static BOOL CCBGTouchIsNativeTransportControl(UITouch *touch, UIView *nativeView
 - (void)reloadIfNeeded:(BOOL)force resolvedMediaName:(NSString *)resolvedMediaName;
 - (void)reloadAfterPreferenceChange;
 - (void)setPlaybackVisible:(BOOL)visible;
+- (void)suspendForInactiveControlCenterPresentation;
 - (void)pausePlaybackPreservingPresentation;
 - (void)restoreSuppressedArtwork;
 - (void)suppressNativeContentInHostView:(UIView *)hostView;
@@ -250,6 +251,10 @@ static NSCache<NSString *, NSData *> *CCBGPreloadedOverlayFrames;
 static NSCache<NSString *, UIImage *> *CCBGPreloadedOverlayImages;
 static NSArray<NSDictionary *> *CCBGPreloadedOverlayCatalog;
 static NSUInteger CCBGOverlayStartupRefreshPasses;
+// A module controller can keep its view/window after Control Center closes.
+// Treat the presentation root, rather than that stale window, as the single
+// authority for whether overlay AVFoundation work may remain active.
+static BOOL CCBGControlCenterPresentationVisible;
 static NSMutableDictionary<NSString *, NSString *> *CCBGLastOverlayDiagnosticValues;
 static CGFloat CCBGGenericModuleExpandedDimension(NSDictionary *module, NSString *suffix, CGFloat fallback, BOOL widthDimension);
 static NSDictionary *CCBGGenericModuleForContainerController(UIViewController *controller);
@@ -1147,6 +1152,12 @@ static UIImageView *CCBGArtworkViewInView(UIView *root, UIView *excluded) {
     // that canvas, not to an intermediate responder that may vanish midway
     // through the transition. This mirrors the five-module child-controller
     // relationship while keeping generic takeover reparenting valid.
+    UIViewController *presentationRoot = CCBGLastPresentationRoot;
+    if (CCBGOverlayUsesCleanTakeover(self) && self.expandedPresentation &&
+        presentationRoot.isViewLoaded && presentationRoot.view.window &&
+        [self isDescendantOfView:presentationRoot.view]) {
+        return presentationRoot;
+    }
     return CCBGViewHostController(self.superview) ?: self.hostController;
 }
 
@@ -2913,6 +2924,42 @@ static BOOL CCBGHasOverlayPreferenceSnapshot(void) {
     }
 }
 
+- (void)suspendForInactiveControlCenterPresentation {
+    // Merely pausing leaves AVPlayerItem's decoder and IOSurface allocations
+    // owned by mediaserverd.  Control Center can retain its module views after
+    // dismissal, so release the item explicitly and force a clean reload on
+    // the next real presentation.
+    self.visibilityGeneration++;
+    self.playbackGeneration++;
+    self.readinessCheckActive = NO;
+    self.nativePresentationRecoveryGeneration++;
+    self.nativePresentationRecoveryArmed = NO;
+    [self stopVisibilityAnimationPreservingPresentation];
+    [self recordActivePlaybackDurationIfNeeded];
+    AVPlayerItem *activeItem = self.player.currentItem;
+    if (activeItem) {
+        NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
+        [center removeObserver:self name:AVPlayerItemDidPlayToEndTimeNotification object:activeItem];
+        [center removeObserver:self name:AVPlayerItemPlaybackStalledNotification object:activeItem];
+        [center removeObserver:self name:AVPlayerItemFailedToPlayToEndTimeNotification object:activeItem];
+    }
+    [self.player pause];
+    [self detachNativePlayerForCompactPresentation];
+    self.nativePlayerController.player = nil;
+    [self.player replaceCurrentItemWithPlayerItem:nil];
+    self.playerLayer.hidden = YES;
+    self.playerLayer.opacity = 0.0;
+    self.imageView.image = nil;
+    self.imageView.hidden = YES;
+    self.dynamicArtwork = nil;
+    self.naturalVideoSize = CGSizeZero;
+    self.configurationSignature = nil;
+    self.lastConfigurationCheck = 0.0;
+    self.hidden = YES;
+    self.alpha = 0.0;
+    self.hasVisibilityTarget = NO;
+}
+
 - (void)restoreSuppressedArtwork {
     if (self.suppressedArtworkView) {
         self.suppressedArtworkView.alpha = self.suppressedArtworkAlpha;
@@ -3567,6 +3614,10 @@ static void CCBGHideController(UIViewController *controller);
 
 static void CCBGShowOverlayWithPresentationArbitration(CCBGSystemOverlayView *overlay) {
     if (!overlay) return;
+    if (!CCBGControlCenterPresentationVisible) {
+        [overlay suspendForInactiveControlCenterPresentation];
+        return;
+    }
     NSArray<CCBGSystemOverlayView *> *views = nil;
     @synchronized (CCBGOverlayViews) { views = CCBGOverlayViews.allObjects; }
     if (overlay.expandedPresentation) {
@@ -3711,6 +3762,15 @@ static void CCBGUpdateController(UIViewController *controller, CCBGSystemOverlay
     }
     if (!CCBGControllerShouldOwnOverlay(controller, kind)) {
         CCBGHideController(controller);
+        return;
+    }
+    // Module controllers are commonly retained between Control Center
+    // presentations. Do not construct an AVAsset/AVPlayerItem merely because
+    // one of those retained controllers receives a layout or preference
+    // callback while the Control Center is closed.
+    if (!CCBGControlCenterPresentationVisible) {
+        CCBGSystemOverlayView *inactiveOverlay = objc_getAssociatedObject(controller, CCBGOverlayAssociationKey);
+        [inactiveOverlay suspendForInactiveControlCenterPresentation];
         return;
     }
     BOOL enabled = [CCBGReadPreference(CCBGEnabledKey(kind), @NO) boolValue];
@@ -3907,7 +3967,20 @@ static void CCBGLayoutControllerOverlay(UIViewController *controller, CCBGSystem
 static void CCBGUpdateOrLayoutController(UIViewController *controller, CCBGSystemOverlayKind kind) {
     if (!controller.isViewLoaded || kind <= 0) return;
     CCBGSystemOverlayView *overlay = objc_getAssociatedObject(controller, CCBGOverlayAssociationKey);
+    if (!CCBGControlCenterPresentationVisible) {
+        [overlay suspendForInactiveControlCenterPresentation];
+        return;
+    }
     if (overlay) {
+        // A presentation dismissal deliberately drops the AVPlayerItem and
+        // removes the overlay from its host.  A geometry-only pass cannot
+        // rebuild either; re-enter the full bind path when Control Center
+        // opens again so covered modules cannot remain invisible.
+        if (CCBGControlCenterPresentationVisible &&
+            (!overlay.superview || !overlay.configurationSignature.length)) {
+            CCBGUpdateController(controller, kind);
+            return;
+        }
         CCBGLayoutControllerOverlay(controller, kind);
         return;
     }
@@ -4049,22 +4122,27 @@ static void CCBGResetTakeoverPresentationState(UIViewController *presentationCon
     NSArray<CCBGSystemOverlayView *> *views = nil;
     @synchronized (CCBGOverlayViews) { views = CCBGOverlayViews.allObjects; }
     for (CCBGSystemOverlayView *overlay in views) {
-        if (!overlay || !CCBGGenericModuleUsesCleanTakeover(overlay.kind)) continue;
+        if (!overlay) continue;
         UIViewController *hostController = overlay.hostController;
         UIView *presentationView = presentationController.viewIfLoaded;
+        // Several Control Center child controllers can disappear while the
+        // sheet is still on-screen.  Never let one child's callback suspend
+        // a sibling module; only release overlays actually mounted below the
+        // dismissed presentation root.
         BOOL belongsToPresentation = !presentationView ||
+            hostController == presentationController ||
             (hostController.viewIfLoaded && [hostController.viewIfLoaded isDescendantOfView:presentationView]) ||
             (overlay.superview && [overlay.superview isDescendantOfView:presentationView]);
         if (!belongsToPresentation) continue;
-        CCBGClearGenericExpandedState(hostController);
-        CCBGClearGenericExpandedStateForKind(overlay.kind);
+        if (CCBGGenericModulesByKind[@(overlay.kind)] || CCBGGenericModuleUsesCleanTakeover(overlay.kind)) {
+            CCBGClearGenericExpandedState(hostController);
+            CCBGClearGenericExpandedStateForKind(overlay.kind);
+        }
         overlay.expandedPresentation = NO;
         overlay.suppressRetainedVisualOnNextReload = YES;
         // Restore native controls only after the Clean surface is no longer
         // visible; otherwise dismissal shows both surfaces at once.
-        [overlay setPlaybackVisible:NO];
-        overlay.hidden = YES;
-        overlay.alpha = 0.0;
+        [overlay suspendForInactiveControlCenterPresentation];
         CCBGRemoveTakeoverBackdrop(overlay);
         [overlay restoreSuppressedNativeContent];
         [overlay removeFromSuperview];
@@ -4088,6 +4166,7 @@ static void CCBGHookControlCenterPresentationClass(Class cls) {
         original = class_getMethodImplementation(cls, selector);
         IMP replacement = imp_implementationWithBlock(^(UIViewController *controller, BOOL animated) {
             ((void (*)(id, SEL, BOOL))original)(controller, selector, animated);
+            CCBGControlCenterPresentationVisible = YES;
             CCBGLastPresentationRoot = controller;
             CCBGApplyVisualThemeAutomationIfNeeded(controller.view);
             // The presentation root can be reused without recreating its
@@ -4110,6 +4189,12 @@ static void CCBGHookControlCenterPresentationClass(Class cls) {
     originalDisappear = class_getMethodImplementation(cls, disappearSelector);
     IMP disappearReplacement = imp_implementationWithBlock(^(UIViewController *controller, BOOL animated) {
         ((void (*)(id, SEL, BOOL))originalDisappear)(controller, disappearSelector, animated);
+        // The hook is installed on more than one Control Center controller
+        // class for iOS-version compatibility.  A nested controller can
+        // disappear during an in-place transition; only the root recorded at
+        // presentation time is allowed to end the shared visibility session.
+        if (controller != CCBGLastPresentationRoot) return;
+        CCBGControlCenterPresentationVisible = NO;
         CCBGResetTakeoverPresentationState(controller);
     });
     class_replaceMethod(cls, disappearSelector, disappearReplacement, disappearTypes);
@@ -4696,22 +4781,26 @@ static void CCBGSystemOverlayReload(CFNotificationCenterRef center, void *observ
             BOOL pluginEnabled = CCBGPluginEnabled();
             NSArray<CCBGSystemOverlayView *> *views = nil;
             @synchronized (CCBGOverlayViews) { views = CCBGOverlayViews.allObjects; }
+            BOOL locked = CCBGSystemIsLocked();
             // Locking is a real Control Center presentation boundary. Clear
             // takeover expansion before the next unlock so a replacement
             // third-party controller cannot reopen in the stale expanded
             // state left by the previous presentation.
-            if (CCBGSystemIsLocked()) {
+            if (locked) {
+                CCBGControlCenterPresentationVisible = NO;
                 for (CCBGSystemOverlayView *overlay in views) {
-                    if (!overlay || !CCBGGenericModuleUsesCleanTakeover(overlay.kind)) continue;
-                    CCBGClearGenericExpandedStateForKind(overlay.kind);
-                    CCBGClearGenericExpandedState(overlay.hostController);
+                    if (!overlay) continue;
+                    if (CCBGGenericModuleUsesCleanTakeover(overlay.kind)) {
+                        CCBGClearGenericExpandedStateForKind(overlay.kind);
+                        CCBGClearGenericExpandedState(overlay.hostController);
+                    }
                     overlay.expandedPresentation = NO;
-                    [overlay detachNativePlayerForCompactPresentation];
+                    [overlay suspendForInactiveControlCenterPresentation];
                     CCBGRemoveTakeoverBackdrop(overlay);
                     [overlay restoreSuppressedNativeContent];
                 }
             }
-            for (CCBGSystemOverlayView *overlay in views) {
+            for (CCBGSystemOverlayView *overlay in (locked ? @[] : views)) {
                 BOOL configured = CCBGGenericModulesByKind[@(overlay.kind)] || overlay.kind <= CCBGSystemOverlayKindVolume;
                 BOOL enabled = configured && [CCBGReadPreference(CCBGEnabledKey(overlay.kind), @NO) boolValue];
                 UIViewController *hostController = overlay.hostController;
@@ -4761,7 +4850,7 @@ static void CCBGSystemOverlayReload(CFNotificationCenterRef center, void *observ
             // lock/unlock cycle. Without both passes, enabling and disabling
             // the master switch can leave a covered module's native view
             // suppressed with no overlay left to restore it.
-            if (pluginEnabled) {
+            if (pluginEnabled && !locked) {
                 CCBGScheduleTrackedOverlayRefreshes();
                 CCBGSchedulePresentationRootRebind();
             }

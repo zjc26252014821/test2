@@ -28,6 +28,15 @@ assert "- (void)scheduleNativePlayerPresentationRecovery" in overlay
 assert "- (void)attachNativePlayerControllerToHost:(UIViewController *)host" in overlay
 assert "- (UIViewController *)nativePlayerPresentationHost" in overlay
 assert "CCBGViewHostController(self.superview) ?: self.hostController" in overlay
+assert "CCBGLastPresentationRoot" in overlay
+assert "CCBGControlCenterPresentationVisible" in overlay
+assert "- (void)suspendForInactiveControlCenterPresentation" in overlay
+assert "[self.player replaceCurrentItemWithPlayerItem:nil];" in overlay
+assert "self.nativePlayerController.player = nil;" in overlay
+assert "removeObserver:self name:AVPlayerItemPlaybackStalledNotification object:activeItem" in overlay
+assert "self.imageView.image = nil;" in overlay
+assert "if (!CCBGControlCenterPresentationVisible)" in overlay
+assert "for (CCBGSystemOverlayView *overlay in (locked ? @[] : views))" in overlay
 assert "[native willMoveToParentViewController:nil]" in overlay
 assert "[self attachNativePlayerControllerToHost:[self nativePlayerPresentationHost]]" in overlay
 assert "[host addChildViewController:controller]" not in overlay
@@ -48,6 +57,7 @@ assert "[self detachNativePlayerForCompactPresentation]" in overlay
 assert "[native willMoveToParentViewController:nil]" in overlay.rsplit("- (void)detachNativePlayerForCompactPresentation", 1)[1]
 assert "[native removeFromParentViewController]" in overlay.rsplit("- (void)detachNativePlayerForCompactPresentation", 1)[1]
 assert "if (expanded) [overlay scheduleNativePlayerPresentationRecovery];" in overlay
+assert "(!overlay.superview || !overlay.configurationSignature.length)" in overlay
 
 # A master-switch re-enable must rediscover currently mounted controllers, and
 # the disable fallback must restore nested native module views.
@@ -265,7 +275,9 @@ assert detach_body.index("[overlay setPlaybackVisible:NO];") < detach_body.index
 scheduled_detach_body = overlay.split("static void CCBGScheduleOverlayDetachAfterDismissal", 1)[1].split("static void CCBGRemoveStaleOverlaysForHost", 1)[0]
 assert scheduled_detach_body.index("[overlay setPlaybackVisible:NO];") < scheduled_detach_body.index("[overlay restoreSuppressedNativeContent];")
 reset_body = overlay.split("static void CCBGResetTakeoverPresentationState", 1)[1].split("static void CCBGHookControlCenterPresentationClass", 1)[0]
-assert reset_body.index("[overlay setPlaybackVisible:NO];") < reset_body.index("[overlay restoreSuppressedNativeContent];")
+assert reset_body.index("[overlay suspendForInactiveControlCenterPresentation];") < reset_body.index("[overlay restoreSuppressedNativeContent];")
+assert "BOOL belongsToPresentation" in reset_body
+assert "if (!belongsToPresentation) continue;" in reset_body
 
 # Native AVPlayer fallback recovery must invalidate the presentation signature;
 # otherwise the 0.45s fallback pass can be skipped as an apparent no-op.
@@ -334,7 +346,7 @@ claim_body = overlay.split("static CCBGSystemOverlayView *CCBGClaimTakeoverOverl
 assert "[candidate detachNativePlayerForCompactPresentation];" in claim_body
 assert "self.expandedPresentation = NO;\n                // The overlay is about to be detached" in overlay
 assert "self.expandedPresentation = NO;\n    [self detachNativePlayerForCompactPresentation];" in overlay
-assert "overlay.expandedPresentation = NO;\n                    [overlay detachNativePlayerForCompactPresentation];" in overlay
+assert "overlay.expandedPresentation = NO;\n                    [overlay suspendForInactiveControlCenterPresentation];" in overlay
 assert 'MediaAboveNative' in overlay
 assert 'genericUsesCustomExpansion' in overlay
 assert 'CCBGGenericModuleUsesCustomExpansion' in overlay

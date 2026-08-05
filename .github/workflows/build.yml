@@ -1,0 +1,144 @@
+name: Build RootHide package
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, codex/2.3-from-2.2.5]
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build tools
+        run: |
+          set -o pipefail
+          for attempt in 1 2 3; do
+            if brew list ldid >/dev/null 2>&1 || brew install ldid 2>&1 | tee /tmp/ccbg-brew.log; then exit 0; fi
+            sleep 10
+          done
+          cat /tmp/ccbg-brew.log
+          exit 1
+      - name: Install Theos
+        run: |
+          set -o pipefail
+          for attempt in 1 2 3; do
+            rm -rf "$GITHUB_WORKSPACE/theos"
+            if git clone --recursive --filter=blob:none --single-branch --depth 1 https://github.com/theos/theos.git "$GITHUB_WORKSPACE/theos" 2>&1 | tee /tmp/ccbg-theos.log; then exit 0; fi
+            sleep 10
+          done
+          cat /tmp/ccbg-theos.log
+          exit 1
+      - name: Validate sources and RootHide packager
+        run: |
+          mkdir -p packages
+          set -o pipefail
+          python3 scripts/validate_source.py 2>&1 | tee packages/validate-source.log
+          python3 scripts/test_2_3_regressions.py 2>&1 | tee packages/2-3-regressions.log
+          python3 scripts/test_reported_module_behavior.py 2>&1 | tee packages/reported-module-behavior.log
+          python3 scripts/test_scene_runtime_safety.py 2>&1 | tee packages/scene-runtime-safety.log
+          python3 scripts/test_scene_simplification.py 2>&1 | tee packages/scene-simplification.log
+          python3 scripts/test_scene_switch_behavior.py 2>&1 | tee packages/scene-switch-behavior.log
+          python3 scripts/test_quick_configuration.py 2>&1 | tee packages/quick-configuration.log
+          python3 scripts/test_scene_usability_regressions.py 2>&1 | tee packages/scene-usability-regressions.log
+          python3 scripts/test_dark_appearance_runtime.py 2>&1 | tee packages/dark-appearance-runtime.log
+          python3 scripts/test_replay_preview_relay_regressions.py 2>&1 | tee packages/replay-preview-relay.log
+          python3 scripts/test_global_controls.py 2>&1 | tee packages/global-controls.log
+          python3 scripts/test_backup_timeline.py 2>&1 | tee packages/backup-timeline.log
+          python3 scripts/test_library_smart_filters.py 2>&1 | tee packages/library-smart-filters.log
+          python3 scripts/test_focus_discovery.py 2>&1 | tee packages/focus-discovery.log
+          python3 scripts/test_app_safety_performance.py 2>&1 | tee packages/app-safety-performance.log
+          python3 scripts/test_video_only_cache_recovery.py 2>&1 | tee packages/video-only-cache-recovery.log
+          python3 scripts/test_visual_theme_features.py 2>&1 | tee packages/visual-theme-features.log
+          python3 scripts/test_visual_feature_visible_effects.py 2>&1 | tee packages/visual-feature-visible-effects.log
+          python3 scripts/test_visual_theme_snapshot_isolation.py 2>&1 | tee packages/visual-theme-snapshot-isolation.log
+          python3 scripts/test_random_theme_open_trigger.py 2>&1 | tee packages/random-theme-open-trigger.log
+          python3 scripts/test_visual_theme_management.py 2>&1 | tee packages/visual-theme-management.log
+          python3 scripts/test_media_usage_locations.py 2>&1 | tee packages/media-usage-locations.log
+          python3 scripts/test_repack_roothide.py 2>&1 | tee packages/repack-test.log
+      - name: Build rootless intermediate package
+        env:
+          THEOS: ${{ github.workspace }}/theos
+        run: |
+          mkdir -p packages
+          set -o pipefail
+          make package FINALPACKAGE=1 2>&1 | tee packages/build-error.txt
+      - name: Convert and verify RootHide package
+        run: python3 scripts/build_roothide.py
+      - name: Upload rootless package on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: CleanCCBG2x2-rootless-debug
+          path: packages/*.deb
+          if-no-files-found: warn
+      - name: Publish failure diagnostics
+        if: failure()
+        run: |
+          if [ -f packages/build-error.txt ]; then
+            cp packages/build-error.txt "$RUNNER_TEMP/build-error.txt"
+          elif [ -f packages/roothide-error.txt ]; then
+            cp packages/roothide-error.txt "$RUNNER_TEMP/build-error.txt"
+          elif [ -f packages/validate-source.log ]; then
+            cat packages/validate-source.log > "$RUNNER_TEMP/build-error.txt"
+            if [ -f packages/reported-module-behavior.log ]; then cat packages/reported-module-behavior.log >> "$RUNNER_TEMP/build-error.txt"; fi
+            if [ -f packages/scene-runtime-safety.log ]; then cat packages/scene-runtime-safety.log >> "$RUNNER_TEMP/build-error.txt"; fi
+            if [ -f packages/scene-simplification.log ]; then cat packages/scene-simplification.log >> "$RUNNER_TEMP/build-error.txt"; fi
+            if [ -f packages/scene-switch-behavior.log ]; then cat packages/scene-switch-behavior.log >> "$RUNNER_TEMP/build-error.txt"; fi
+            if [ -f packages/quick-configuration.log ]; then cat packages/quick-configuration.log >> "$RUNNER_TEMP/build-error.txt"; fi
+            if [ -f packages/scene-usability-regressions.log ]; then cat packages/scene-usability-regressions.log >> "$RUNNER_TEMP/build-error.txt"; fi
+            if [ -f packages/dark-appearance-runtime.log ]; then cat packages/dark-appearance-runtime.log >> "$RUNNER_TEMP/build-error.txt"; fi
+            if [ -f packages/replay-preview-relay.log ]; then cat packages/replay-preview-relay.log >> "$RUNNER_TEMP/build-error.txt"; fi
+            if [ -f packages/global-controls.log ]; then cat packages/global-controls.log >> "$RUNNER_TEMP/build-error.txt"; fi
+            if [ -f packages/backup-timeline.log ]; then cat packages/backup-timeline.log >> "$RUNNER_TEMP/build-error.txt"; fi
+            if [ -f packages/library-smart-filters.log ]; then cat packages/library-smart-filters.log >> "$RUNNER_TEMP/build-error.txt"; fi
+            if [ -f packages/focus-discovery.log ]; then cat packages/focus-discovery.log >> "$RUNNER_TEMP/build-error.txt"; fi
+            if [ -f packages/app-safety-performance.log ]; then cat packages/app-safety-performance.log >> "$RUNNER_TEMP/build-error.txt"; fi
+            if [ -f packages/visual-theme-features.log ]; then cat packages/visual-theme-features.log >> "$RUNNER_TEMP/build-error.txt"; fi
+            if [ -f packages/visual-feature-visible-effects.log ]; then cat packages/visual-feature-visible-effects.log >> "$RUNNER_TEMP/build-error.txt"; fi
+            if [ -f packages/visual-theme-snapshot-isolation.log ]; then cat packages/visual-theme-snapshot-isolation.log >> "$RUNNER_TEMP/build-error.txt"; fi
+            if [ -f packages/random-theme-open-trigger.log ]; then cat packages/random-theme-open-trigger.log >> "$RUNNER_TEMP/build-error.txt"; fi
+            if [ -f packages/visual-theme-management.log ]; then cat packages/visual-theme-management.log >> "$RUNNER_TEMP/build-error.txt"; fi
+            if [ -f packages/media-usage-locations.log ]; then cat packages/media-usage-locations.log >> "$RUNNER_TEMP/build-error.txt"; fi
+            if [ -f packages/repack-test.log ]; then cat packages/repack-test.log >> "$RUNNER_TEMP/build-error.txt"; fi
+          elif [ -f /tmp/ccbg-theos.log ]; then
+            cp /tmp/ccbg-theos.log "$RUNNER_TEMP/build-error.txt"
+          elif [ -f /tmp/ccbg-brew.log ]; then
+            cp /tmp/ccbg-brew.log "$RUNNER_TEMP/build-error.txt"
+          else
+            printf 'Build failed before a compiler or RootHide diagnostic was produced.\n' > "$RUNNER_TEMP/build-error.txt"
+          fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git checkout --orphan build-diagnostics
+          git rm -rf .
+          cp "$RUNNER_TEMP/build-error.txt" build-error.txt
+          git add build-error.txt
+          git commit -m "RootHide build failure $GITHUB_RUN_ID"
+          git push --force origin HEAD:build-diagnostics
+      - name: Publish successful package over Git
+        run: |
+          package_path=$(find packages -maxdepth 1 -type f -name 'com.zjc.cleanccbg2x2_*_roothide_iphoneos-arm64e.deb' -print -quit)
+          test -n "$package_path"
+          package_name=$(basename "$package_path")
+          cp "packages/$package_name" "$RUNNER_TEMP/$package_name"
+          (cd "$RUNNER_TEMP" && shasum -a 256 "$package_name" > SHA256SUMS)
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git checkout --orphan build-artifacts
+          git rm -rf .
+          cp "$RUNNER_TEMP/$package_name" "$package_name"
+          cp "$RUNNER_TEMP/SHA256SUMS" SHA256SUMS
+          git add -f "$package_name" SHA256SUMS
+          git commit -m "RootHide package $GITHUB_RUN_ID"
+          git push --force origin HEAD:build-artifacts
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: CleanCCBG2x2-RootHide
+          path: packages/*roothide*.deb
+          if-no-files-found: error

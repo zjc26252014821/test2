@@ -1,0 +1,9 @@
+Package: com.zjc.cleanccbg2x2
+Name: Clean Control Center Media Suite
+Version: 2.3.0
+Architecture: iphoneos-arm64
+Description: Five independently configured clean-room Control Center modules with a shared media library
+Maintainer: zjc
+Author: zjc
+Section: Tweaks
+Depends: firmware (>= 15.0), com.opa334.ccsupport

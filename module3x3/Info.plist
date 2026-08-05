@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+    <key>CFBundleDevelopmentRegion</key><string>zh_CN</string>
+    <key>CFBundleDisplayName</key><string>Clean Background 3x3</string>
+    <key>CFBundleExecutable</key><string>CleanCCBG3x3</string>
+    <key>CFBundleIdentifier</key><string>com.zjc.cleanccbg2x2.module3x3</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>CFBundleName</key><string>CleanCCBG3x3</string>
+    <key>CFBundlePackageType</key><string>BNDL</string>
+<key>CFBundleShortVersionString</key><string>2.3.0</string>
+<key>CFBundleVersion</key><string>20300</string>
+    <key>NSPrincipalClass</key><string>CleanCCBG3x3Module</string>
+    <key>CCSGetModuleSizeAtRuntime</key><true/>
+    <key>CFBundleSupportedPlatforms</key><array><string>iPhoneOS</string></array>
+    <key>MinimumOSVersion</key><string>15.0</string>
+    <key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>
+    <key>CCSModuleSize</key><dict>
+        <key>Portrait</key><dict><key>Width</key><integer>3</integer><key>Height</key><integer>3</integer></dict>
+        <key>Landscape</key><dict><key>Width</key><integer>3</integer><key>Height</key><integer>3</integer></dict>
+    </dict>
+</dict></plist>

@@ -343,6 +343,18 @@ assert "[self clearPreloadedNextMedia];" in module_disappear_body
 set_visible_block = overlay.rsplit("- (void)setPlaybackVisible:(BOOL)visible", 1)[1].split("- (void)restoreSuppressedArtwork", 1)[0]
 assert "self.player.currentItem.status != AVPlayerItemStatusReadyToPlay" in set_visible_block
 assert "|| self.imageView.image != nil" not in set_visible_block
+# A covered module may become visible without a fresh Control Center layout
+# pass. Its native transport must be reconciled directly from the visibility
+# boundary instead of waiting for an incidental layout callback.
+assert "if (visible && self.expandedPresentation && CCBGOverlayUsesCleanTakeover(self)) {" in set_visible_block
+assert "[self updateNativePlayerPresentation];" in set_visible_block
+visibility_early_return = set_visible_block.index("if (!targetChanged && presentationMatches) return;")
+visibility_native_reconcile = set_visible_block.index("if (visible && self.expandedPresentation && CCBGOverlayUsesCleanTakeover(self)) {")
+assert visibility_native_reconcile < visibility_early_return
+# Recovery exists for AVKit's asynchronous child-view attach, but it must not
+# force Control Center through a synchronous layout wave on every retry.
+native_recovery = overlay.split("- (void)scheduleNativePlayerPresentationRecovery", 1)[1].split("- (void)detachNativePlayerForCompactPresentation", 1)[0]
+assert "[self layoutIfNeeded];" not in native_recovery
 
 # Appearance preferences are applied from preference/transition callbacks;
 # layout passes only re-check them when geometry or expanded state changed.
@@ -495,7 +507,8 @@ assert "if (!CCBGControlCenterPresentationVisible) return;" in hide_controller
 # display can use a longer preference cache, while CCAster edit mode keeps a
 # short window so the drag remains live.
 ccaster_grid_read = module.rsplit("static BOOL CCBGReadCCAsterGridSize", 1)[1].split("static CCUILayoutSize CCBGRuntimeModuleSize", 1)[0]
-assert "CCBGIsCCAsterEditModeActive(controller.viewIfLoaded) ? 0.10 : 2.0" in ccaster_grid_read
+assert "UIView *controllerView = [(UIViewController *)controller viewIfLoaded];" in ccaster_grid_read
+assert "CCBGIsCCAsterEditModeActive(controllerView) ? 0.10 : 2.0" in ccaster_grid_read
 runtime_grid_read = module.rsplit("static CCUILayoutSize CCBGRuntimeModuleSize", 1)[1].split("static BOOL CCBGCurrentInterfaceIsLandscape", 1)[0]
 assert "now - CCBGLastRuntimeGridReadAt >= 2.0" in runtime_grid_read
 

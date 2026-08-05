@@ -1285,9 +1285,6 @@ static UIImageView *CCBGArtworkViewInView(UIView *root, UIView *excluded) {
                 native.view.alpha = expectedAlpha;
                 native.showsPlaybackControls = YES;
                 [expectedHost bringSubviewToFront:native.view];
-                [expectedHost setNeedsLayout];
-                [self setNeedsLayout];
-                [self layoutIfNeeded];
             }
             if (delayValue.doubleValue >= 1.20) self.nativePresentationRecoveryArmed = NO;
         });
@@ -2845,6 +2842,13 @@ static BOOL CCBGHasOverlayPreferenceSnapshot(void) {
         CGFloat expectedMediaAlpha = visualAlpha;
         presentationMatches = presentationMatches && fabs(self.imageView.alpha - expectedMediaAlpha) <= 0.01;
         presentationMatches = presentationMatches && fabs(self.playerLayer.opacity - expectedMediaAlpha) <= 0.01;
+    }
+    // This must precede the presentation convergence return. A covered module
+    // can already look visible after Control Center reparents it even though
+    // AVKit's child view was detached during that same transition.
+    if (visible && self.expandedPresentation && CCBGOverlayUsesCleanTakeover(self)) {
+        [self updateNativePlayerPresentation];
+        [self scheduleNativePlayerPresentationRecovery];
     }
     if (!targetChanged && presentationMatches) return;
     self.hasVisibilityTarget = YES;

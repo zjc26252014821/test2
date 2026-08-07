@@ -4415,13 +4415,14 @@ static void CCBGPresentationRecoveryCallback(
 - (void)updateNativePlayerPresentation {
     BOOL hasVideoPlayer = self.player.currentItem && self.currentItem && CCBGIsVideoName(self.currentItem[@"fileName"]);
     // CCSupport may call layout dozens of times while the module is moving.
-    // Do not repeatedly detach/reattach AVPlayerViewController in that window;
-    // the compact layer is already kept visible by the transition callbacks.
-    if (self.expandedContentTransitionActive) return;
-    // During willTransition the host still reports compact bounds. Keep the
-    // compact AVPlayerLayer visible until didTransition/viewDidLayoutSubviews
-    // provide the final expanded geometry.
-    BOOL useNativePlayer = hasVideoPlayer && self.expanded && !self.expandedContentTransitionActive;
+    // Avoid creating an empty AVKit surface before the item exists, but do
+    // not let a missed didTransition callback block a video that finishes
+    // loading during the first expanded presentation.
+    if (self.expandedContentTransitionActive && !hasVideoPlayer) return;
+    // During willTransition the host can still report compact bounds. Once a
+    // real item exists, mount AVKit and let the bounded recovery wave settle
+    // its final expanded geometry instead of leaving it permanently compact.
+    BOOL useNativePlayer = hasVideoPlayer && self.expanded;
 
     CGFloat inset = MIN(24.0, MAX(0.0, [CCBGModulePreference(@"moduleInset", @0) doubleValue]));
     CGRect contentFrame = CGRectInset(self.view.bounds, inset, inset);

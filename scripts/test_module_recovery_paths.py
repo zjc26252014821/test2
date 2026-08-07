@@ -75,6 +75,10 @@ def main() -> None:
     assert "nativePlayerMissing" in mounted_recovery
     assert "nativePlayerController.view.hidden" in mounted_recovery
 
+    native_presentation = block(module, "- (void)updateNativePlayerPresentation", "- (void)updateAdaptiveExpandedSizeForItem")
+    assert "if (self.expandedContentTransitionActive && !hasVideoPlayer) return;" in native_presentation
+    assert "BOOL useNativePlayer = hasVideoPlayer && self.expanded;" in native_presentation
+
     dismissal = block(overlay, "static void CCBGScheduleOverlayDetachAfterDismissal", "static CCBGSystemOverlayKind CCBGAssociatedGenericKindForController")
     assert "dismissalGeneration" in dismissal
     assert "dispatch_after" in dismissal

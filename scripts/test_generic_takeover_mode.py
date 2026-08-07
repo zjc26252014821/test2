@@ -113,8 +113,14 @@ assert "controller.preferredContentSize" in layout_controller_body
 assert layout_controller_body.index("CCBGPlaceOverlay(overlay, hostView)") < layout_controller_body.index("CCBGKeepTakeoverOverlayOnTop(overlay)")
 
 callback_body = SOURCE.split("static void CCBGHookGenericExpansionCallback", 1)[1].split("static void CCBGHookConfiguredModuleClass", 1)[0]
-assert "if (CCBGGenericModuleUsesCleanTakeover(kind)) return;" in callback_body
-assert callback_body.index("if (CCBGGenericModuleUsesCleanTakeover(kind)) return;") < callback_body.index("objc_setAssociatedObject(object, CCBGGenericExpandedStateAssociationKey")
+# A takeover must preserve the third-party module's real long-press callback.
+# ReplayKit performs its expansion lifecycle in this method; short-circuiting
+# it leaves the module compact and no expanded player can be presented.
+assert "if (CCBGGenericModuleUsesCleanTakeover(kind)) return;" not in callback_body
+native_callback = "((void (*)(id, SEL, BOOL))original)(object, selector, expanded);"
+assert native_callback in callback_body
+assert "CCBGRefreshGenericModuleExpansion(object, kind, expanded);" in callback_body
+assert callback_body.index(native_callback) < callback_body.index("objc_setAssociatedObject(object, CCBGGenericExpandedStateAssociationKey")
 reload_body = SOURCE.split("static void CCBGSystemOverlayReload", 1)[1].split("static void CCBGSystemOverlayPresentationRecovery", 1)[0]
 assert "CCBGClearGenericExpandedState(hostController)" in reload_body
 assert "CCBGGenericModuleUsesCleanTakeover(overlay.kind)" in reload_body

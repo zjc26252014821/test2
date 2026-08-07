@@ -4814,14 +4814,15 @@ static void CCBGHookGenericExpansionCallback(Class cls, NSString *selectorName, 
     class_addMethod(cls, selector, original, types);
     original = class_getMethodImplementation(cls, selector);
     IMP replacement = imp_implementationWithBlock(^(id object, BOOL expanded) {
-        // Clean takeover owns expansion state. Native callbacks can report a
-        // transient compact state while the module rebuilds, which would
-        // immediately undo Clean's long-press expansion.
-        if (CCBGGenericModuleUsesCleanTakeover(kind)) return;
-        objc_setAssociatedObject(object, CCBGGenericExpandedStateAssociationKey, @(expanded), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        // Ordinary modules retain their native expansion callback and state
-        // synchronization; takeover returned above before reaching this path.
+        // The system callback is the actual long-press transition contract for
+        // modules such as ReplayKit. Never short-circuit it for Clean takeover:
+        // doing so leaves the module compact and prevents the replacement
+        // player surface from ever receiving an expanded presentation.
         ((void (*)(id, SEL, BOOL))original)(object, selector, expanded);
+        objc_setAssociatedObject(object, CCBGGenericExpandedStateAssociationKey, @(expanded), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        // Synchronize after the native callback. This preserves native module
+        // lifecycle work while Clean remains the source of the overlay frame,
+        // media selection, and AVKit presentation once the transition settles.
         CCBGRefreshGenericModuleExpansion(object, kind, expanded);
     });
     class_replaceMethod(cls, selector, replacement, types);

@@ -3067,48 +3067,50 @@ static void CCBGExportVideoOnlyAsset(NSString *path, NSString *cacheKey, NSStrin
         exportSession.shouldOptimizeForNetworkUse = YES;
         dispatch_async(CCBGVideoOnlyExportQueue(), ^{
             dispatch_semaphore_t finished = dispatch_semaphore_create(0);
-            __block BOOL handlerRan = NO;
+            NSObject *completionLock = [NSObject new];
+            __block BOOL completionFinished = NO;
+            __block BOOL exportCallbackStarted = NO;
+            void (^finishOnce)(AVAsset *, NSError *) = ^(AVAsset *asset, NSError *error) {
+                BOOL shouldFinish = NO;
+                @synchronized (completionLock) {
+                    if (!completionFinished) {
+                        completionFinished = YES;
+                        shouldFinish = YES;
+                    }
+                }
+                if (!shouldFinish) return;
+                CCBGFinishVideoOnlyAssetLoad(cacheKey, asset, error);
+                dispatch_semaphore_signal(finished);
+            };
             [exportSession exportAsynchronouslyWithCompletionHandler:^{
-                // BUGFIX: this handler can, in rare cases (e.g. the hosting
-                // process is suspended mid-export by the OS), never fire,
-                // which used to hang CCBGVideoOnlyExportQueue() forever via an
-                // unbounded dispatch_semaphore_wait below and block every
-                // subsequent video-only export queued behind it. Guard the
-                // handler itself so a late/duplicate callback after a timeout
-                // can't double-signal or double-complete.
-                @synchronized (fileManager) {
-                    if (handlerRan) return;
-                    handlerRan = YES;
+                @synchronized (completionLock) {
+                    if (exportCallbackStarted || completionFinished) return;
+                    exportCallbackStarted = YES;
                 }
                 if (exportSession.status != AVAssetExportSessionStatusCompleted) {
                     [fileManager removeItemAtPath:temporaryPath error:nil];
                     NSError *error = exportSession.error ?: [NSError errorWithDomain:@"com.zjc.cleanccbg2x2.video" code:6
                                                                              userInfo:@{NSLocalizedDescriptionKey: @"Video-only export failed"}];
-                    CCBGFinishVideoOnlyAssetLoad(cacheKey, nil, error);
-                    dispatch_semaphore_signal(finished);
+                    finishOnce(nil, error);
                     return;
                 }
+                __block NSError *moveError = nil;
                 @synchronized (fileManager) {
                     if ([fileManager fileExistsAtPath:finalPath]) {
                         [fileManager removeItemAtPath:temporaryPath error:nil];
-                    } else {
-                        NSError *moveError = nil;
-                        if (![fileManager moveItemAtPath:temporaryPath toPath:finalPath error:&moveError]) {
-                            [fileManager removeItemAtPath:temporaryPath error:nil];
-                            if (![fileManager fileExistsAtPath:finalPath]) {
-                                CCBGFinishVideoOnlyAssetLoad(cacheKey, nil, moveError);
-                                dispatch_semaphore_signal(finished);
-                                return;
-                            }
-                        }
+                    } else if (![fileManager moveItemAtPath:temporaryPath toPath:finalPath error:&moveError]) {
+                        [fileManager removeItemAtPath:temporaryPath error:nil];
                     }
+                }
+                if (moveError && ![fileManager fileExistsAtPath:finalPath]) {
+                    finishOnce(nil, moveError);
+                    return;
                 }
                 NSURL *outputURL = [NSURL fileURLWithPath:finalPath];
                 AVURLAsset *fileAsset = [AVURLAsset URLAssetWithURL:outputURL options:@{AVURLAssetPreferPreciseDurationAndTimingKey: @NO}];
                 CCBGValidateVideoOnlyAsset(fileAsset, ^(BOOL valid, NSError *validationError) {
                     if (!valid) [fileManager removeItemAtPath:finalPath error:nil];
-                    CCBGFinishVideoOnlyAssetLoad(cacheKey, valid ? fileAsset : nil, validationError);
-                    dispatch_semaphore_signal(finished);
+                    finishOnce(valid ? fileAsset : nil, validationError);
                 });
             }];
             // BUGFIX: bound the wait instead of DISPATCH_TIME_FOREVER. 45s is
@@ -3118,20 +3120,11 @@ static void CCBGExportVideoOnlyAsset(NSString *path, NSString *cacheKey, NSStrin
             // serial export queue is never stuck indefinitely.
             dispatch_time_t timeout = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(45.0 * NSEC_PER_SEC));
             if (dispatch_semaphore_wait(finished, timeout) != 0) {
-                BOOL shouldFinishHere = NO;
-                @synchronized (fileManager) {
-                    if (!handlerRan) {
-                        handlerRan = YES;
-                        shouldFinishHere = YES;
-                    }
-                }
                 [exportSession cancelExport];
-                if (shouldFinishHere) {
-                    [fileManager removeItemAtPath:temporaryPath error:nil];
-                    NSError *error = [NSError errorWithDomain:@"com.zjc.cleanccbg2x2.video" code:7
-                                                     userInfo:@{NSLocalizedDescriptionKey: @"Video-only export timed out"}];
-                    CCBGFinishVideoOnlyAssetLoad(cacheKey, nil, error);
-                }
+                [fileManager removeItemAtPath:temporaryPath error:nil];
+                NSError *error = [NSError errorWithDomain:@"com.zjc.cleanccbg2x2.video" code:7
+                                                 userInfo:@{NSLocalizedDescriptionKey: @"Video-only export timed out"}];
+                finishOnce(nil, error);
             }
         });
     });
@@ -3189,8 +3182,13 @@ void CCBGLoadVideoOnlyAsset(NSString *path, void (^completion)(AVAsset *asset, N
 }
 
 NSString *CCBGPathForItem(NSDictionary *item) {
-    NSString *fileName = item[@"fileName"];
-    return fileName.length ? [CCBGMediaDirectoryPath stringByAppendingPathComponent:fileName] : nil;
+    NSString *fileName = [item[@"fileName"] isKindOfClass:NSString.class] ? item[@"fileName"] : nil;
+    if (!fileName.length || [fileName isEqualToString:@"."] || [fileName isEqualToString:@".."] ||
+        ![fileName.lastPathComponent isEqualToString:fileName]) return nil;
+    NSString *basePath = [CCBGMediaDirectoryPath stringByStandardizingPath];
+    NSString *candidatePath = [[basePath stringByAppendingPathComponent:fileName] stringByStandardizingPath];
+    NSString *allowedPrefix = [basePath stringByAppendingString:@"/"];
+    return [candidatePath hasPrefix:allowedPrefix] ? candidatePath : nil;
 }
 
 unsigned long long CCBGMediaStorageBytes(void) {

@@ -1581,8 +1581,12 @@ static void CCBGPresentationRecoveryCallback(
     [self.slideTimer invalidate];
     self.slideTimer = nil;
     [self.environmentTimer invalidate];
-    [self.videoWatchdog invalidate];
     self.environmentTimer = nil;
+    // resumeVideoPlaybackIfNeeded only recreates this timer when the property
+    // is nil. Leaving an invalidated timer here disabled stall detection after
+    // the first Control Center dismissal.
+    [self.videoWatchdog invalidate];
+    self.videoWatchdog = nil;
     [self recordActivePlaybackDurationIfNeeded];
     [self.player pause];
     if (CCBGIsVideoName(self.currentItem[@"fileName"])) self.lastVideoSuspendedAt = NSProcessInfo.processInfo.systemUptime;
@@ -3592,19 +3596,23 @@ static void CCBGPresentationRecoveryCallback(
 - (UIImage *)filteredImageAtPath:(NSString *)path item:(NSDictionary *)item {
     UIImage *source = [self.preloadedFileName isEqualToString:item[@"fileName"]] ? self.preloadedImage : nil;
     if (!source && [path.pathExtension.lowercaseString isEqualToString:@"gif"] && ![CCBGModulePreference(@"performanceMode", @NO) boolValue]) {
+        // Do not expand every GIF frame in SpringBoard. Large animated GIFs
+        // can otherwise multiply decoded image memory across five modules.
         CGImageSourceRef sourceRef = CGImageSourceCreateWithURL((__bridge CFURLRef)[NSURL fileURLWithPath:path], NULL);
-        size_t count = sourceRef ? CGImageSourceGetCount(sourceRef) : 0;
-        NSMutableArray *frames = [NSMutableArray array];
-        NSTimeInterval duration = 0;
-        for (size_t index = 0; index < count; index++) {
-            CGImageRef frame = CGImageSourceCreateImageAtIndex(sourceRef, index, NULL);
-            if (!frame) continue;
-            [frames addObject:[UIImage imageWithCGImage:frame]];
-            CGImageRelease(frame);
-            duration += 0.1;
+        if (sourceRef) {
+            NSDictionary *options = @{
+                (__bridge NSString *)kCGImageSourceCreateThumbnailFromImageAlways: @YES,
+                (__bridge NSString *)kCGImageSourceCreateThumbnailWithTransform: @YES,
+                (__bridge NSString *)kCGImageSourceThumbnailMaxPixelSize: @960,
+                (__bridge NSString *)kCGImageSourceShouldCacheImmediately: @NO,
+            };
+            CGImageRef frame = CGImageSourceCreateThumbnailAtIndex(sourceRef, 0, (__bridge CFDictionaryRef)options);
+            if (frame) {
+                source = [UIImage imageWithCGImage:frame];
+                CGImageRelease(frame);
+            }
+            CFRelease(sourceRef);
         }
-        if (sourceRef) CFRelease(sourceRef);
-        if (frames.count) source = [UIImage animatedImageWithImages:frames duration:MAX(0.1, duration)];
     }
     if (!source) source = [UIImage imageWithContentsOfFile:path];
     if (!source.CIImage && !source.CGImage) return source;

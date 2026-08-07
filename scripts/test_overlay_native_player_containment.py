@@ -12,6 +12,8 @@ def test_presentation_host_must_own_the_overlay() -> None:
     host_body = body("- (UIViewController *)nativePlayerPresentationHost", "- (void)updateNativePlayerPresentation")
     assert "return self.hostController;" not in host_body
     assert "return nil;" in host_body
+    assert "CCBGTakeoverRootView(self.hostController)" in host_body
+    assert "CCBGViewHostController(mountedRoot)" in host_body
 
 
 def test_update_keeps_avkit_unmounted_without_a_valid_host() -> None:

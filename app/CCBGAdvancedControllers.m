@@ -708,9 +708,16 @@ static NSString *CCBGDashboardModeSummary(NSUInteger slot, NSArray<NSDictionary 
             [media enumerateKeysAndObjectsUsingBlock:^(id rawName, id rawEncoded, BOOL *stop) {
                 if (error || ![rawName isKindOfClass:NSString.class] || ![rawEncoded isKindOfClass:NSString.class]) return;
                 NSString *name = rawName;
-                if (!name.length || ![name.lastPathComponent isEqualToString:name]) return;
+                if (!name.length || ![name.lastPathComponent isEqualToString:name] ||
+                    [name isEqualToString:@"."] || [name isEqualToString:@".."] ||
+                    ![CCBGPathForItem(@{@"fileName": name}) length]) {
+                    error = [NSError errorWithDomain:@"com.zjc.cleanccbg2x2.backup" code:4
+                                             userInfo:@{NSLocalizedDescriptionKey: @"备份包含非法素材文件名。"}];
+                    *stop = YES;
+                    return;
+                }
                 NSData *decoded = [[NSData alloc] initWithBase64EncodedString:rawEncoded options:0];
-                if (!decoded || ![decoded writeToFile:[CCBGMediaDirectoryPath stringByAppendingPathComponent:name] options:NSDataWritingAtomic error:&error]) *stop = YES;
+                if (!decoded || ![decoded writeToFile:CCBGPathForItem(@{@"fileName": name}) options:NSDataWritingAtomic error:&error]) *stop = YES;
             }];
         }
         BOOL restored = NO;

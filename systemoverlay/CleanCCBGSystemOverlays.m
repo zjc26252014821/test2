@@ -1236,6 +1236,15 @@ static UIImageView *CCBGArtworkViewInView(UIView *root, UIView *excluded) {
     // through the transition. This mirrors the five-module child-controller
     // relationship while keeping generic takeover reparenting valid.
     if (CCBGOverlayUsesCleanTakeover(self) && self.expandedPresentation) {
+        // In third-party modules the expanded takeover is mounted on the
+        // Control Center root canvas, which is not always in the original
+        // module controller's parent chain. Resolve the owner from the
+        // actual mounted root first; otherwise AVKit remains detached forever
+        // even though the overlay itself is visible.
+        UIView *mountedRoot = CCBGTakeoverRootView(self.hostController);
+        UIViewController *mountedRootHost = CCBGViewHostController(mountedRoot);
+        if (mountedRootHost && mountedRootHost.isViewLoaded &&
+            [self isDescendantOfView:mountedRootHost.view]) return mountedRootHost;
         UIViewController *mountedHost = CCBGTakeoverRootController(self.hostController, self);
         if (mountedHost) return mountedHost;
     }

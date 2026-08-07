@@ -1320,6 +1320,8 @@ static CCBGSwitchCell *CCBGConfiguredModuleSwitch(UITableView *tableView, NSStri
                 @"compactMedia": CCBGReadPreference([prefix stringByAppendingString:@"CompactMedia"], @""),
                 @"expandedMedia": CCBGReadPreference([prefix stringByAppendingString:@"ExpandedMedia"], @""),
                 @"lastRuntimeMatch": CCBGReadPreference([prefix stringByAppendingString:@"LastRuntimeMatch"], @{}),
+                @"takeoverCleanLongPress": CCBGReadPreference([prefix stringByAppendingString:@"TakeoverCleanLongPress"], @{}),
+                @"takeoverNativeExpansionBlocked": CCBGReadPreference([prefix stringByAppendingString:@"TakeoverNativeExpansionBlocked"], @{}),
             }];
         }
     }

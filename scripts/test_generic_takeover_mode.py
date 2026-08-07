@@ -35,16 +35,16 @@ assert "self.mediaContainerView.backgroundColor" in layout_body
 assert "suppressedNativeGestureStates" in SOURCE
 assert "gesture.enabled = NO" in SOURCE
 suppression_body = SOURCE.split("- (BOOL)nativeSuppressionMatchesHostView", 1)[1].split("@end", 1)[0]
-# Native module long presses are the real expansion entry point for ReplayKit.
-# Keep them enabled while other native gestures remain suppressed under Clean.
-assert "[gesture isKindOfClass:UILongPressGestureRecognizer.class]" in suppression_body
-assert suppression_body.count("[gesture isKindOfClass:UILongPressGestureRecognizer.class]") == 2
-# Diagnostic builds must report each step of a generic takeover expansion.
+# Clean owns the expansion gesture. ReplayKit's native long press otherwise
+# presents its background controller full-screen and bypasses the player.
+assert "[gesture isKindOfClass:UILongPressGestureRecognizer.class]" not in suppression_body
+# Diagnostic builds must retain the handoff state outside the bounded trace.
 for event in [
     "takeover-clean-long-press",
-    "takeover-native-expansion",
     "takeover-presentation-change",
     "takeover-player-probe",
+    "TakeoverCleanLongPress",
+    "TakeoverNativeExpansionBlocked",
 ]:
     assert event in SOURCE
 

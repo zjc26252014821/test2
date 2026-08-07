@@ -2242,12 +2242,14 @@ static BOOL CCBGHasOverlayPreferenceSnapshot(void) {
         // coerced to BOOL and would make the first long press collapse instead
         // of expand.
         BOOL expanded = self.expandedPresentation;
-        CCBGRecordModuleLifecycleEvent(-1, @"takeover-clean-long-press", @{
-            @"kind": @(self.kind),
+        NSDictionary *trace = @{
             @"controller": NSStringFromClass(self.hostController.class),
             @"fromExpanded": @(expanded),
             @"toExpanded": @(!expanded),
-        });
+            @"time": @(NSDate.date.timeIntervalSince1970),
+        };
+        CCBGRecordModuleLifecycleEvent(-1, @"takeover-clean-long-press", trace);
+        CCBGRecordRuntimeDiagnostic(CCBGOverlayKey(self.kind, @"TakeoverCleanLongPress"), trace);
         CCBGSetGenericExpandedState(self.hostController, !expanded);
         // Takeover expansion is owned by Clean. Do not call the native module
         // collection: some third-party modules have no native expanded state.
@@ -3187,8 +3189,7 @@ static BOOL CCBGHasOverlayPreferenceSnapshot(void) {
             !view.layer.hidden || view.layer.opacity > 0.01f) return NO;
     }
     for (UIGestureRecognizer *gesture in hostView.gestureRecognizers) {
-        if (gesture == self.swipeLeft || gesture == self.swipeRight || gesture == self.stateTap || gesture == self.longPress ||
-            [gesture isKindOfClass:UILongPressGestureRecognizer.class]) continue;
+        if (gesture == self.swipeLeft || gesture == self.swipeRight || gesture == self.stateTap || gesture == self.longPress) continue;
         NSDictionary *state = nil;
         for (NSDictionary *candidate in self.suppressedNativeGestureStates) {
             if (candidate[@"gesture"] == gesture) { state = candidate; break; }
@@ -3233,12 +3234,11 @@ static BOOL CCBGHasOverlayPreferenceSnapshot(void) {
         view.layer.opacity = 0.0;
     }
     for (UIGestureRecognizer *gesture in [hostView.gestureRecognizers copy]) {
-        if (gesture == self.swipeLeft || gesture == self.swipeRight || gesture == self.stateTap || gesture == self.longPress ||
-            [gesture isKindOfClass:UILongPressGestureRecognizer.class]) continue;
-        // ReplayKit and several third-party Control Center modules attach their
-        // real expansion entry point to the host view. The Clean overlay stays
-        // visually and interactively on top, but this system long press must
-        // remain enabled so its lifecycle callback can drive the takeover.
+        if (gesture == self.swipeLeft || gesture == self.swipeRight || gesture == self.stateTap || gesture == self.longPress) continue;
+        // A Clean takeover owns the long press. ReplayKit's native long press
+        // pushes its background controller full-screen, which bypasses the
+        // bounded Clean player surface entirely. Suppress it with the other
+        // native recognizers while preserving Clean's recognizer above.
         BOOL alreadySuppressed = NO;
         for (NSDictionary *state in self.suppressedNativeGestureStates) {
             if (state[@"gesture"] == gesture) { alreadySuppressed = YES; break; }
@@ -4851,15 +4851,20 @@ static void CCBGHookGenericExpansionCallback(Class cls, NSString *selectorName, 
     class_addMethod(cls, selector, original, types);
     original = class_getMethodImplementation(cls, selector);
     IMP replacement = imp_implementationWithBlock(^(id object, BOOL expanded) {
-        // The system callback is the actual long-press transition contract for
-        // modules such as ReplayKit. Never short-circuit it for Clean takeover:
-        // doing so leaves the module compact and prevents the replacement
-        // player surface from ever receiving an expanded presentation.
+        if (CCBGGenericModuleUsesCleanTakeover(kind)) {
+            // The Clean overlay recognizes the long press and owns the bounded
+            // presentation. Letting ReplayKit consume this callback presents
+            // RPControlCenterModuleBackgroundViewController full-screen and
+            // bypasses the replacement player's controller hierarchy.
+            CCBGRecordRuntimeDiagnostic(CCBGOverlayKey(kind, @"TakeoverNativeExpansionBlocked"), @{
+                @"expanded": @(expanded),
+                @"module": NSStringFromClass([object class]),
+                @"time": @(NSDate.date.timeIntervalSince1970),
+            });
+            return;
+        }
         ((void (*)(id, SEL, BOOL))original)(object, selector, expanded);
         objc_setAssociatedObject(object, CCBGGenericExpandedStateAssociationKey, @(expanded), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        // Synchronize after the native callback. This preserves native module
-        // lifecycle work while Clean remains the source of the overlay frame,
-        // media selection, and AVKit presentation once the transition settles.
         CCBGRefreshGenericModuleExpansion(object, kind, expanded);
     });
     class_replaceMethod(cls, selector, replacement, types);

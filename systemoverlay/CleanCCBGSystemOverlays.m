@@ -3170,7 +3170,8 @@ static BOOL CCBGHasOverlayPreferenceSnapshot(void) {
             !view.layer.hidden || view.layer.opacity > 0.01f) return NO;
     }
     for (UIGestureRecognizer *gesture in hostView.gestureRecognizers) {
-        if (gesture == self.swipeLeft || gesture == self.swipeRight || gesture == self.stateTap || gesture == self.longPress) continue;
+        if (gesture == self.swipeLeft || gesture == self.swipeRight || gesture == self.stateTap || gesture == self.longPress ||
+            [gesture isKindOfClass:UILongPressGestureRecognizer.class]) continue;
         NSDictionary *state = nil;
         for (NSDictionary *candidate in self.suppressedNativeGestureStates) {
             if (candidate[@"gesture"] == gesture) { state = candidate; break; }
@@ -3215,7 +3216,12 @@ static BOOL CCBGHasOverlayPreferenceSnapshot(void) {
         view.layer.opacity = 0.0;
     }
     for (UIGestureRecognizer *gesture in [hostView.gestureRecognizers copy]) {
-        if (gesture == self.swipeLeft || gesture == self.swipeRight || gesture == self.stateTap || gesture == self.longPress) continue;
+        if (gesture == self.swipeLeft || gesture == self.swipeRight || gesture == self.stateTap || gesture == self.longPress ||
+            [gesture isKindOfClass:UILongPressGestureRecognizer.class]) continue;
+        // ReplayKit and several third-party Control Center modules attach their
+        // real expansion entry point to the host view. The Clean overlay stays
+        // visually and interactively on top, but this system long press must
+        // remain enabled so its lifecycle callback can drive the takeover.
         BOOL alreadySuppressed = NO;
         for (NSDictionary *state in self.suppressedNativeGestureStates) {
             if (state[@"gesture"] == gesture) { alreadySuppressed = YES; break; }

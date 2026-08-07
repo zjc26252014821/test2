@@ -34,6 +34,11 @@ assert "self.opaque = NO;" in layout_body
 assert "self.mediaContainerView.backgroundColor" in layout_body
 assert "suppressedNativeGestureStates" in SOURCE
 assert "gesture.enabled = NO" in SOURCE
+suppression_body = SOURCE.split("- (BOOL)nativeSuppressionMatchesHostView", 1)[1].split("@end", 1)[0]
+# Native module long presses are the real expansion entry point for ReplayKit.
+# Keep them enabled while other native gestures remain suppressed under Clean.
+assert "[gesture isKindOfClass:UILongPressGestureRecognizer.class]" in suppression_body
+assert suppression_body.count("[gesture isKindOfClass:UILongPressGestureRecognizer.class]") == 2
 
 hit_test_body = SOURCE.split("- (UIView *)hitTest:(CGPoint)point withEvent", 1)[1].split("- (void)expandedModeButtonTapped", 1)[0]
 assert "CCBGOverlayUsesCleanTakeover" in hit_test_body

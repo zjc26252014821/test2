@@ -39,6 +39,14 @@ suppression_body = SOURCE.split("- (BOOL)nativeSuppressionMatchesHostView", 1)[1
 # Keep them enabled while other native gestures remain suppressed under Clean.
 assert "[gesture isKindOfClass:UILongPressGestureRecognizer.class]" in suppression_body
 assert suppression_body.count("[gesture isKindOfClass:UILongPressGestureRecognizer.class]") == 2
+# Diagnostic builds must report each step of a generic takeover expansion.
+for event in [
+    "takeover-clean-long-press",
+    "takeover-native-expansion",
+    "takeover-presentation-change",
+    "takeover-player-probe",
+]:
+    assert event in SOURCE
 
 hit_test_body = SOURCE.split("- (UIView *)hitTest:(CGPoint)point withEvent", 1)[1].split("- (void)expandedModeButtonTapped", 1)[0]
 assert "CCBGOverlayUsesCleanTakeover" in hit_test_body

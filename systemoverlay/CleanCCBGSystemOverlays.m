@@ -1270,6 +1270,17 @@ static UIImageView *CCBGArtworkViewInView(UIView *root, UIView *excluded) {
     BOOL ready = hasVideo && (playerItem.status == AVPlayerItemStatusReadyToPlay ||
                               self.nativePlayerPresentationFallbackVisible);
     UIViewController *host = [self nativePlayerPresentationHost];
+    if (CCBGGenericModuleUsesCleanTakeover(self.kind) && self.expandedPresentation) {
+        CCBGRecordModuleLifecycleEvent(-1, @"takeover-player-probe", @{
+            @"kind": @(self.kind),
+            @"media": self.currentItem[@"fileName"] ?: @"",
+            @"hasVideo": @(hasVideo),
+            @"item": @(playerItem != nil),
+            @"status": @(playerItem ? playerItem.status : -1),
+            @"ready": @(ready),
+            @"host": host ? NSStringFromClass(host.class) : @"",
+        });
+    }
     // Control Center can reparent the takeover view before its new owner is
     // present in the responder/controller chain. AVKit must stay detached in
     // that gap: adding its view without an owning child controller corrupts
@@ -2231,6 +2242,12 @@ static BOOL CCBGHasOverlayPreferenceSnapshot(void) {
         // coerced to BOOL and would make the first long press collapse instead
         // of expand.
         BOOL expanded = self.expandedPresentation;
+        CCBGRecordModuleLifecycleEvent(-1, @"takeover-clean-long-press", @{
+            @"kind": @(self.kind),
+            @"controller": NSStringFromClass(self.hostController.class),
+            @"fromExpanded": @(expanded),
+            @"toExpanded": @(!expanded),
+        });
         CCBGSetGenericExpandedState(self.hostController, !expanded);
         // Takeover expansion is owned by Clean. Do not call the native module
         // collection: some third-party modules have no native expanded state.
@@ -4049,6 +4066,14 @@ static void CCBGUpdateController(UIViewController *controller, CCBGSystemOverlay
     overlay.layoutHostView = hostView;
     if (!overlay.superview || CGRectIsEmpty(overlay.bounds)) overlay.frame = hostView.bounds;
     BOOL presentationChanged = overlay.expandedPresentation != expanded;
+    if (cleanTakeover && presentationChanged) {
+        CCBGRecordModuleLifecycleEvent(-1, @"takeover-presentation-change", @{
+            @"kind": @(kind),
+            @"controller": NSStringFromClass(controller.class),
+            @"expanded": @(expanded),
+            @"media": selectedName ?: @"",
+        });
+    }
     // Capture the transition before CCBGPlaceOverlay: that helper preserves
     // the old root-frame when reparenting, which gives the collapse animator
     // a real visual starting point instead of the compact bounds.
@@ -4802,6 +4827,12 @@ static void CCBGRefreshGenericModuleExpansion(id moduleObject, CCBGSystemOverlay
     if (![controller isKindOfClass:UIViewController.class] && [moduleObject respondsToSelector:contentSelector]) {
         controller = ((id (*)(id, SEL))objc_msgSend)(moduleObject, contentSelector);
     }
+    CCBGRecordModuleLifecycleEvent(-1, @"takeover-native-expansion", @{
+        @"kind": @(kind),
+        @"expanded": @(expanded),
+        @"module": NSStringFromClass([moduleObject class]),
+        @"controller": controller ? NSStringFromClass(controller.class) : @"",
+    });
     if (![controller isKindOfClass:UIViewController.class]) return;
     CCBGSetGenericExpandedState(controller, expanded);
     dispatch_async(dispatch_get_main_queue(), ^{

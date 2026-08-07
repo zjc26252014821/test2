@@ -623,11 +623,17 @@ static NSString *CCBGSelectedOverlayMediaName(CCBGSystemOverlayKind kind, BOOL e
     NSString *stateName = CCBGGenericStateMediaName(kind, view);
     if (stateName.length) return stateName;
     NSString *fixedName = CCBGReadPreference(CCBGFixedMediaKey(kind, expanded), @"");
-    if (CCBGOverlayPlaybackMode(kind, expanded) == 0) return fixedName ?: @"";
+    if (CCBGOverlayPlaybackMode(kind, expanded) == 0 && fixedName.length) return fixedName;
     NSString *currentName = CCBGReadPreference(CCBGCurrentMediaKey(kind, expanded), @"");
     if ([currentName isKindOfClass:NSString.class] && currentName.length) return currentName;
     if (!expanded && (kind == CCBGSystemOverlayKindBrightness || kind == CCBGSystemOverlayKindVolume) &&
         [fixedName isKindOfClass:NSString.class]) return fixedName;
+    // MediaAboveNative creates a Clean-owned expanded surface even for a
+    // module that never had native expanded media configured. Do not turn a
+    // valid compact video into an empty expanded card in that case.
+    if (expanded && CCBGGenericModuleUsesCleanTakeover(kind)) {
+        return CCBGSelectedOverlayMediaName(kind, NO, view);
+    }
     return @"";
 }
 

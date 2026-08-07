@@ -12,6 +12,9 @@ assert "return YES;" in custom_body
 
 takeover_body = SOURCE.split("static BOOL CCBGGenericModuleUsesCleanTakeover", 1)[1].split("static CGSize CCBGCleanExpandedMaximumSize", 1)[0]
 assert "MediaAboveNative" in takeover_body
+selected_media_body = SOURCE.split("static NSString *CCBGSelectedOverlayMediaName", 1)[1].split("static NSArray<NSDictionary *> *CCBGAvailableOverlayItems", 1)[0]
+assert "expanded && CCBGGenericModuleUsesCleanTakeover(kind)" in selected_media_body
+assert "CCBGSelectedOverlayMediaName(kind, NO, view)" in selected_media_body
 assert "kind >= CCBGSystemOverlayKindConnectivity && kind <= CCBGSystemOverlayKindVolume" in takeover_body
 assert "CCBGGenericExpandedStates" in SOURCE
 assert "CCBGGenericExpandedStateForKind" in SOURCE

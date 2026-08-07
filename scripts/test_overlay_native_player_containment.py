@@ -12,7 +12,10 @@ def test_presentation_host_must_own_the_overlay() -> None:
     host_body = body("- (UIViewController *)nativePlayerPresentationHost", "- (void)updateNativePlayerPresentation")
     assert "return self.hostController;" not in host_body
     assert "return nil;" in host_body
-    assert "CCBGTakeoverRootView(self.hostController)" in host_body
+    assert "CCBGLastPresentationRoot" in host_body
+    assert "presentationRoot.isViewLoaded" in host_body
+    assert "return presentationRoot;" in host_body
+    assert host_body.index("return presentationRoot;") < host_body.index("CCBGTakeoverRootView(self.hostController)")
     assert "CCBGViewHostController(mountedRoot)" in host_body
 
 
